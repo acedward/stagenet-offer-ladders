@@ -20,7 +20,6 @@
  *
  * @module
  */
-import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -36,31 +35,22 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-import * as ledger from "@midnightntwrk/ledger-v9";
-import {
-  DustAddress,
-  MidnightBech32m,
-  ShieldedAddress,
-  ShieldedCoinPublicKey,
-  ShieldedEncryptionPublicKey,
-  UnshieldedAddress,
-} from "@midnightntwrk/wallet-sdk-address-format";
-import { HDWallet, Roles } from "@midnightntwrk/wallet-sdk-hd";
-import { createKeystore, type UnshieldedKeystore } from "@midnightntwrk/wallet-sdk-unshielded-wallet";
-import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
+import { DustAddress, MidnightBech32m, ShieldedAddress, UnshieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
+import { generateMnemonic, validateMnemonic } from "@scure/bip39";
 import { wordlist as english } from "@scure/bip39/wordlists/english.js";
+
+import {
+  deriveWalletKeys as deriveKeysBip39,
+  type PublicWalletIdentity,
+  publicIdentity as identityFromKeys,
+  type WalletKeys,
+} from "./wallet.ts";
 
 // ---------------------------------------------------------------------------
 // Keys
 // ---------------------------------------------------------------------------
 
-/** Secret key material of a wallet (in memory only; call `clear` when done). */
-export interface WalletKeys {
-  readonly shieldedSecretKeys: ledger.ZswapSecretKeys;
-  readonly dustSecretKey: ledger.DustSecretKey;
-  readonly unshieldedKeystore: UnshieldedKeystore;
-  clear(): void;
-}
+export type { PublicWalletIdentity, WalletKeys } from "./wallet.ts";
 
 /** A fresh 24-word English BIP-39 mnemonic from the platform CSPRNG. */
 export const newMnemonic = (): string => generateMnemonic(english, 256);
@@ -75,68 +65,16 @@ export const normaliseMnemonic = (mnemonic: string): string => {
   return phrase;
 };
 
-/** BIP-39 seed → HD account 0 → Zswap / NightExternal / Dust at key 0. */
-export const deriveWalletKeys = (mnemonic: string, networkId: string, account = 0): WalletKeys => {
-  const seed = mnemonicToSeedSync(normaliseMnemonic(mnemonic));
-  try {
-    const hd = HDWallet.fromSeed(seed);
-    if (hd.type !== "seedOk") throw new Error("wallet seed rejected by the HD derivation");
-    try {
-      const derived = hd.hdWallet
-        .selectAccount(account)
-        .selectRoles([Roles.Zswap, Roles.NightExternal, Roles.Dust] as const)
-        .deriveKeysAt(0);
-      if (derived.type !== "keysDerived") throw new Error("wallet key derivation out of bounds");
-      const shieldedSecretKeys = ledger.ZswapSecretKeys.fromSeed(derived.keys[Roles.Zswap]);
-      const dustSecretKey = ledger.DustSecretKey.fromSeed(derived.keys[Roles.Dust]);
-      const unshieldedKeystore = createKeystore({ kind: "schnorr", secret: derived.keys[Roles.NightExternal] }, networkId);
-      for (const key of Object.values(derived.keys)) key.fill(0);
-      return {
-        shieldedSecretKeys,
-        dustSecretKey,
-        unshieldedKeystore,
-        clear: () => {
-          shieldedSecretKeys.clear();
-          dustSecretKey.clear();
-        },
-      };
-    } finally {
-      hd.hdWallet.clear();
-    }
-  } finally {
-    seed.fill(0);
-  }
-};
+/**
+ * BIP-39 seed → HD account 0 → Zswap / NightExternal / Dust at key 0: 00052's
+ * `deriveWalletKeys` (the derivation proven on the stagenet funding wallet), after
+ * normalising and validating the phrase.
+ */
+export const deriveWalletKeys = (mnemonic: string, networkId: string, account = 0): WalletKeys =>
+  deriveKeysBip39(normaliseMnemonic(mnemonic), networkId, "bip39", account);
 
-/** Public identity of a wallet: safe to print and record. */
-export interface PublicWalletIdentity {
-  readonly networkId: string;
-  /** Unshielded address: send NIGHT here. */
-  readonly unshieldedAddress: string;
-  readonly shieldedAddress: string;
-  readonly dustAddress: string;
-  /** Zswap coin public key, hex. */
-  readonly coinPublicKey: string;
-  /** Zswap encryption public key, hex. */
-  readonly encryptionPublicKey: string;
-}
-
-export const publicIdentity = (keys: WalletKeys, networkId: string): PublicWalletIdentity => {
-  const coinPublicKey = keys.shieldedSecretKeys.coinPublicKey;
-  const encryptionPublicKey = keys.shieldedSecretKeys.encryptionPublicKey;
-  const shielded = new ShieldedAddress(
-    new ShieldedCoinPublicKey(Buffer.from(coinPublicKey, "hex")),
-    new ShieldedEncryptionPublicKey(Buffer.from(encryptionPublicKey, "hex")),
-  );
-  return {
-    networkId,
-    unshieldedAddress: keys.unshieldedKeystore.getBech32Address().asString(),
-    shieldedAddress: MidnightBech32m.encode(networkId, shielded).asString(),
-    dustAddress: DustAddress.encodePublicKey(networkId, keys.dustSecretKey.publicKey),
-    coinPublicKey,
-    encryptionPublicKey,
-  };
-};
+/** Public identity of a wallet: safe to print and record (00052's `publicIdentity`). */
+export const publicIdentity = (keys: WalletKeys, networkId: string): PublicWalletIdentity => identityFromKeys(keys, networkId);
 
 /** Derive the public identity and clear the secret keys straight away. */
 export const identityOf = (mnemonic: string, networkId: string): PublicWalletIdentity => {

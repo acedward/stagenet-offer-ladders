@@ -126,6 +126,11 @@ export interface LadderFile {
   readonly ladders: readonly LadderDef[];
   /** Nonces (64 hex) never assigned to a slot, e.g. taker reserves in single-wallet mode. */
   readonly excludeNonces?: readonly string[] | undefined;
+  /**
+   * If set, ONLY these nonces may be assigned to slots (a fixed coin pool; single-wallet
+   * test). Coins the wallet receives later (e.g. a settlement's outputs) are never adopted.
+   */
+  readonly includeNonces?: readonly string[] | undefined;
 }
 
 /** One ladder slot: a fixed-price offer position. */
@@ -217,6 +222,14 @@ export const parseLadderFile = (raw: unknown): LadderFile => {
     }
     excludeNonces = excludeRaw as string[];
   }
+  const includeRaw = raw["includeNonces"];
+  let includeNonces: string[] | undefined;
+  if (includeRaw !== undefined) {
+    if (!Array.isArray(includeRaw) || !includeRaw.every((n) => typeof n === "string" && /^[0-9a-f]{64}$/u.test(n))) {
+      throw new LadderConfigError('"includeNonces" must be an array of 64-hex nonces');
+    }
+    includeNonces = includeRaw as string[];
+  }
   return {
     version: 1,
     networkId,
@@ -225,6 +238,7 @@ export const parseLadderFile = (raw: unknown): LadderFile => {
     tokens,
     ladders,
     excludeNonces,
+    includeNonces,
   };
 };
 

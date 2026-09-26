@@ -211,6 +211,20 @@ describe("single-wallet-pinned, outbox mode (the P3 shape)", () => {
     expect(scheduler.deps.journal.slots().map((r) => r.current?.coinNonce)).not.toContain(excluded);
   });
 
+  test("a fixed coin pool (includeNonces): coins received later are never adopted", async () => {
+    const wallet = fundingWallet();
+    const pool = new Set(["A1", "A2", "A3", "B1", "B2", "B3"].map((l) => coin(l.startsWith("A") ? COLOUR_A : COLOUR_B, l, GIVE).nonce));
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding"), config: { includeNonces: pool } });
+    await scheduler.runTick();
+    const ab02 = scheduler.deps.journal.get("AB-02")!;
+    // Settlement in the same wallet: AB-02's coin is spent, and the taker leg brings a NEW
+    // exact-size stkA coin back into the wallet. It must not be adopted.
+    wallet.spend(ab02.current!.coinNonce, coin(COLOUR_A, "received-by-taker", GIVE));
+    const report = await scheduler.runTick();
+    expect(report).toMatchObject({ consumed: 1, depleted: 1, built: 0 });
+    expect(scheduler.deps.journal.get("AB-02")!.state).toBe("depleted");
+  });
+
   test("restart: a new process with the same journal posts no duplicate", async () => {
     const wallet = fundingWallet();
     const first = rig({ wallets: [wallet], slots: testSlots(() => "funding") });

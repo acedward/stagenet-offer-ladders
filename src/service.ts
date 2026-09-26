@@ -28,6 +28,7 @@ import { FUNDING_WALLET_ID, SessionPool } from "./ladder-wallet.ts";
 import { fetchLedgerParameters, stagenet, type WalletNetwork } from "./network.ts";
 import { Outbox } from "./outbox.ts";
 import { type Log, Scheduler, type SchedulerConfig, type SlotPlan, systemClock } from "./scheduler.ts";
+import { stateDir, takeFundingLock } from "./state.ts";
 import { startStatusServer, type StatusServer } from "./status.ts";
 import { defaultMakersFile, readMakersFile, readMnemonicFile } from "./wallets.ts";
 
@@ -73,6 +74,21 @@ export const coloursFromDeployments = (raw: unknown, symbols: readonly string[])
   };
   visit(raw);
   return out;
+};
+
+/**
+ * The funding wallet is shared (00052's tools, other projects): every process that opens it
+ * holds `funding.lock` in the state directory (00052's `src/state.ts`). With
+ * `FUNDING_LOCK_HELD=true` an operator already holds it for a whole test phase; the lock
+ * file must then exist.
+ */
+export const fundingLock = (purpose: string): { release(): void } => {
+  if (env("FUNDING_LOCK_HELD") === "true") {
+    const path = join(stateDir(), "funding.lock");
+    if (!existsSync(path)) throw new LadderConfigError(`FUNDING_LOCK_HELD=true but ${path} does not exist`);
+    return { release: () => undefined };
+  }
+  return takeFundingLock(purpose);
 };
 
 export interface ServiceConfig {
@@ -140,6 +156,7 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
       retryBaseMs: num("RETRY_BASE_SECONDS", 60, 1) * 1000,
       retryMaxMs: num("RETRY_MAX_SECONDS", ttlMinutes * 60, 1) * 1000,
       excludeNonces: new Set(ladders.excludeNonces ?? []),
+      includeNonces: ladders.includeNonces ? new Set(ladders.includeNonces) : undefined,
       maxBuildsPerTick: maxBuilds === 0 ? Number.POSITIVE_INFINITY : maxBuilds,
       outboxRetentionMs: num("OUTBOX_RETENTION_HOURS", 168) * 3_600_000,
     },
@@ -186,7 +203,9 @@ export const createService = async (config: ServiceConfig, logLine: (line: strin
   const { height, parameters } = await fetchLedgerParameters(config.network);
   logLine(`ledger parameters from block ${height}`);
   const mnemonics = new Map<string, string>();
+  let lock: { release(): void } | undefined;
   if (config.mode === "single-wallet-pinned") {
+    lock = fundingLock("00053 ladder service (single-wallet-pinned)");
     mnemonics.set(FUNDING_WALLET_ID, readMnemonicFile(config.fundingWalletFile));
   } else {
     const makers = readMakersFile(config.makersFile);
@@ -218,6 +237,7 @@ export const createService = async (config: ServiceConfig, logLine: (line: strin
     async close() {
       await service.status?.stop().catch(() => undefined);
       await wallets.closeAll();
+      lock?.release();
     },
   };
   if (config.statusPort > 0) {

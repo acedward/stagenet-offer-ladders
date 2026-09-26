@@ -333,6 +333,38 @@ export class WalletSession {
     };
   }
 
+  /**
+   * Pay fees for a proven contract-call transaction, sign the balancing part and bind it
+   * (midnight-js `WalletProvider.balanceTx`). Waits up to 10 min for enough DUST.
+   * Same recipe as 00052's `src/wallet.ts` `balanceTx`.
+   */
+  async balanceTx(
+    tx: ledger.Transaction<ledger.SignatureEnabled, ledger.Proof, ledger.PreBinding>,
+    ttl?: Date,
+  ): Promise<ledger.FinalizedTransaction> {
+    const transactionTtl = ttl ?? new Date(Date.now() + 20 * 60 * 1000);
+    const deadline = Date.now() + 600_000;
+    for (;;) {
+      try {
+        await this.facade.estimateTransactionFee(tx, this.#keys.dustSecretKey, { ttl: transactionTtl });
+        break;
+      } catch (error) {
+        const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        if (!/insufficient funds|could not balance dust/iu.test(text)) throw error;
+        if (Date.now() >= deadline) throw new Error("timed out waiting for enough DUST for the fee");
+        this.#log("waiting for the wallet to hold enough DUST for the fee");
+        await new Promise((r) => setTimeout(r, 5_000));
+      }
+    }
+    const recipe = await this.facade.balanceUnboundTransaction(tx, this.secretKeys, { ttl: transactionTtl });
+    const signed = await this.facade.signRecipe(recipe, (data) => this.signData(data));
+    return await this.facade.finalizeRecipe(signed);
+  }
+
+  submitTx(tx: ledger.FinalizedTransaction): Promise<string> {
+    return this.facade.submitTransaction(tx);
+  }
+
   async close(): Promise<void> {
     try {
       await this.facade.stop();

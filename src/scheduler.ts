@@ -100,6 +100,8 @@ export interface SchedulerConfig {
   readonly retryBaseMs: number;
   readonly retryMaxMs: number;
   readonly excludeNonces: ReadonlySet<string>;
+  /** If set, the only nonces a slot may be given (a fixed coin pool). */
+  readonly includeNonces?: ReadonlySet<string> | undefined;
   /** Builds per tick (default: unlimited). */
   readonly maxBuildsPerTick: number;
   /** Outbox entries of ended offers are removed after this long. */
@@ -162,13 +164,17 @@ export function retryDelayMs(cfg: SchedulerConfig, consecutiveFailures: number):
 export function chooseCoin(
   record: Pick<SlotRecord, "slot" | "giveColour" | "giveAmount" | "coinNonce">,
   snapshot: WalletSnapshot,
-  cfg: Pick<SchedulerConfig, "coinPolicy" | "excludeNonces">,
+  cfg: Pick<SchedulerConfig, "coinPolicy" | "excludeNonces" | "includeNonces">,
   taken: ReadonlySet<string>,
 ): CoinRef | undefined {
   const give = BigInt(record.giveAmount);
   const valueOk = (value: bigint): boolean => (cfg.coinPolicy === "exact" ? value === give : value >= give);
   const eligible = (coin: CoinRef): boolean =>
-    coin.type === record.giveColour && !cfg.excludeNonces.has(coin.nonce) && !taken.has(coin.nonce) && valueOk(coin.value);
+    coin.type === record.giveColour &&
+    !cfg.excludeNonces.has(coin.nonce) &&
+    (cfg.includeNonces === undefined || cfg.includeNonces.has(coin.nonce)) &&
+    !taken.has(coin.nonce) &&
+    valueOk(coin.value);
   if (record.coinNonce !== undefined) {
     const same = snapshot.spendable.find((coin) => coin.nonce === record.coinNonce);
     if (same !== undefined && eligible(same)) return same;
@@ -182,13 +188,14 @@ export function chooseCoin(
 export function inventoryOf(
   record: Pick<SlotRecord, "giveColour" | "giveAmount">,
   snapshot: WalletSnapshot,
-  cfg: Pick<SchedulerConfig, "coinPolicy" | "excludeNonces">,
+  cfg: Pick<SchedulerConfig, "coinPolicy" | "excludeNonces" | "includeNonces">,
 ): { coins: number; value: bigint } {
   const give = BigInt(record.giveAmount);
   let coins = 0;
   let value = 0n;
   for (const coin of snapshot.spendable) {
     if (coin.type !== record.giveColour || cfg.excludeNonces.has(coin.nonce)) continue;
+    if (cfg.includeNonces !== undefined && !cfg.includeNonces.has(coin.nonce)) continue;
     if (cfg.coinPolicy === "exact" ? coin.value !== give : coin.value < give) continue;
     coins += 1;
     value += coin.value;
