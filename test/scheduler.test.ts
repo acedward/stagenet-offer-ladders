@@ -454,6 +454,21 @@ describe("kernel mode against the mock kernel (API.md dedup: output markers only
     expect(await scheduler.runTick()).toMatchObject({ built: 0, posted: 0 });
   });
 
+  test("C7: when the kernel first lists an offer live, its inputNullifiers must be exactly the pinned coin, else halt", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel) });
+    await scheduler.runTick();
+    const ab01 = scheduler.deps.journal.get("AB-01")!.current!;
+    const held = kernel.offers.get(ab01.offerId)!;
+    kernel.offers.set(ab01.offerId, { ...held, nullifiers: ["ff".repeat(32)] });
+    clock.advance(60_000);
+    await scheduler.runTick();
+    expect(scheduler.deps.journal.get("AB-01")!.state).toBe("halted");
+    expect(scheduler.deps.journal.get("AB-01")!.lastError?.code).toBe("INPUT_NULLIFIER_MISMATCH");
+    expect(scheduler.deps.journal.get("AB-02")!.state).toBe("live");
+  });
+
   test("crash between build and ack: the restart re-posts the SAME blob (no second build)", async () => {
     kernel = new MockKernel().start();
     const wallet = fundingWallet();

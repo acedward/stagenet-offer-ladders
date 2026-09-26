@@ -85,6 +85,8 @@ export interface KernelPort {
   liveOffers(colours: readonly string[]): Promise<KernelLiveOffer[]>;
   /** The `swapoffer1…` string of an offer the kernel holds, if any. */
   offerBlob(offerId: string): Promise<string | undefined>;
+  /** The kernel's `computed.inputNullifiers` for an offer, if it can be read. */
+  offerNullifiers?(offerId: string): Promise<string[] | undefined>;
 }
 
 export interface Clock {
@@ -508,6 +510,15 @@ export class Scheduler {
     }
     if (status === "live") {
       if (record.state !== "live") {
+        // The kernel's own view of what the offer spends must be exactly our pinned coin
+        // (the upstream poster's post-live check; audit C7/B7).
+        const seen = await kernel.offerNullifiers?.(current.offerId).catch(() => undefined);
+        if (seen !== undefined && (seen.length !== 1 || seen[0]!.toLowerCase() !== current.coinNullifier)) {
+          journal.halt(slot, "INPUT_NULLIFIER_MISMATCH", `kernel reports inputs [${seen.join(", ")}] for ${current.offerId}`);
+          counts.errors += 1;
+          actions.push("halted:INPUT_NULLIFIER_MISMATCH");
+          return;
+        }
         journal.markLive(slot);
         actions.push("live(kernel)");
       }

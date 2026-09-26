@@ -305,6 +305,14 @@ export class KernelClient {
     return typeof blob === "string" ? blob : undefined;
   }
 
+  /** The kernel's `computed.inputNullifiers` for an offer, or `undefined` if not readable. */
+  async offerNullifiers(offerId: string): Promise<string[] | undefined> {
+    const answer = await this.#request(`/v1/offers/${offerId}`, { method: "GET" });
+    if (answer.status !== 200) return undefined;
+    const list = (answer.body as { computed?: { inputNullifiers?: unknown } } | null)?.computed?.inputNullifiers;
+    return Array.isArray(list) ? list.map((n) => String(n).toLowerCase()) : undefined;
+  }
+
   /** `GET /v1/offers/:hash` (the kernel's view, incl. `computed.inputNullifiers`). */
   async getOffer(offerId: string): Promise<{ status: number; body: unknown }> {
     const answer = await this.#request(`/v1/offers/${offerId}`, { method: "GET" });
