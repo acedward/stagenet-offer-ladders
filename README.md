@@ -203,11 +203,52 @@ are in `ladders/makers.stagenet.public.json`.
 | `offers:settle --slot AB-02 --pay-with <nonce>` | test taker: settle a stored offer with the funding wallet, paying with a pinned coin |
 | `funding:status` | balances of the funding wallet |
 
+### Before funding all 20 makers: staged rollout (audit C13)
+
+The production shape (20 facades in one process, the change-returning path, kernel mode
+against a real kernel) has not run yet. Do it in stages:
+
+1. Fund 2–3 makers only (for example `AB-01`, `AB-02`, `BC-01`), register DUST, mint.
+2. Run the service in `wallet-per-slot`, **outbox mode**, with a ladder file listing only
+   those slots, for **2+ hours**. Record the process RSS (`docker stats`), the first-tick
+   time, and at least one real change-returning build. Set `LADDER_MEM_LIMIT` from it.
+3. Before relying on kernel mode unattended, run one real post against the stagenet kernel
+   (or FR-006's local devnet + kernel end-to-end) and watch `/status` go `submitted` → `live`.
+4. Then fund the rest and use the full `ladders/stagenet.json`.
+
+### Operating rules
+
+- **Never delete the state directory** (`~/.stagenet-offer-ladders/state`: journal, outbox,
+  `service.lock`, `maker-mints.json`) while offers are live, and back it up. The journal is
+  what stops the service from posting a second live offer on the same coin; the kernel does
+  not deduplicate inputs. Compose bind-mounts this host directory, so `docker compose down -v`
+  does not delete it; do not replace it with a volume.
+- **One process per state directory.** Every `ladder:*` and `makers:*` command takes
+  `service.lock` there; stop the service before running `makers:*` commands.
+- **A corrupt journal is quarantined**: the service refuses to start until you have checked
+  the kernel's live offers for your makers and started once with `JOURNAL_RESET=true`. In
+  kernel mode a fresh journal adopts the kernel's matching live offers instead of posting
+  twins, and builds nothing while the kernel's list cannot be read.
+- **A pending mint is never repeated**: `makers:mint` records the call nonce before
+  submitting. If a maker shows `skip-pending-unresolved`, check the chain for that coin, then
+  `makers:mint --clear-pending <slot>`.
+- **Version guard**: the service halts (and `/health` fails) when the node's
+  `system_version` differs from `EXPECTED_NODE_VERSION` (default `2.0.0-d9729c13`).
+- **Watchdog**: `ladder:run` exits with code 70 when it makes no progress for
+  `WATCHDOG_SECONDS`, and after a build that exceeds `BUILD_TIMEOUT_SECONDS`; Compose's
+  `restart: unless-stopped` brings it back.
+- **Single-wallet mode is for supervised tests only**: the funding wallet is shared with
+  other projects; hold its `funding.lock` for the whole run.
+
 ### State, health and safety
 
-- Journal and outbox: `$STATE_DIR` (compose: the `ladder-data` volume). The journal is
-  written atomically; a slot's offer is journaled as `posting` before it leaves the
-  process, so a crash re-posts the same offer instead of building a second one.
+- Journal and outbox: `$STATE_DIR` (compose: the host directory
+  `~/.stagenet-offer-ladders/state`). The journal is written atomically (candidate → fsync
+  → rename → directory fsync); a slot's offer is journaled as `stored` before it leaves the
+  process, so a crash re-posts the same offer instead of building a second one. Slot states:
+  `stored` (in the outbox) → `submitted` (kernel accepted) → `live` (kernel lists it).
+- An offer is rebuilt only when it is provably dead: the kernel says expired or consumed,
+  or `ROOT_WINDOW_MINUTES` (default 60) has passed since it was built.
 - `GET /health` returns `ok` (no data) while the scheduler makes progress;
   `GET /status` returns the slot table (no secrets).
 - Kernel refusals (conflict, malformed, not sponsored) are journaled with their code and

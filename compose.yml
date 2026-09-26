@@ -21,6 +21,7 @@ services:
     build: .
     image: stagenet-offer-ladders:${IMAGE_TAG:-local}
     restart: unless-stopped
+    mem_limit: ${LADDER_MEM_LIMIT:-4g}
     depends_on:
       - proof-server
     env_file:
