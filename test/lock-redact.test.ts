@@ -104,6 +104,37 @@ describe("C16 redaction", () => {
     expect(redact("schnorr:" + "cd".repeat(32))).toContain("cd".repeat(32)); // public verifying-key form stays
   });
 
+  test("F-B29: JSON-escaped, `_ . /`-joined and camelCase phrases, and an escaped signing key, are redacted", () => {
+    const words = "abandon ability able about above absent absorb abstract absurd abuse access accident".split(" ");
+    const camel = words.map((w, i) => (i === 0 ? w : w[0]!.toUpperCase() + w.slice(1))).join("");
+    for (const joined of [words.join("_"), words.join("."), words.join("/"), camel, JSON.stringify(words.join("\n")), words.join("\\n"), words.join("\u0020")]) {
+      expect(redact(`x ${joined} y`)).not.toContain("bstract");
+    }
+    const escapedKey = JSON.stringify(JSON.stringify({ tag: "schnorr", value: "ab".repeat(32) }));
+    expect(redact(escapedKey)).not.toContain("ab".repeat(32));
+  });
+
+  test("F-B29: a newline-separated phrase inside an error reaches neither stderr nor the JSON result", async () => {
+    const { log, printResult } = await import("../src/cli.ts");
+    const phrase = "abandon ability able about above absent absorb abstract absurd abuse access accident".split(" ").join("\n");
+    const errs: string[] = [];
+    const outs: string[] = [];
+    const e = console.error;
+    const o = console.log;
+    console.error = (m: string) => errs.push(m);
+    console.log = (m: string) => outs.push(m);
+    try {
+      log(`failure: ${phrase}`);
+      printResult({ error: `wrapped: ${phrase}`, nested: [{ key: JSON.stringify({ tag: "schnorr", value: "cd".repeat(32) }) }] });
+    } finally {
+      console.error = e;
+      console.log = o;
+    }
+    expect(errs.join("")).not.toContain("absorb");
+    expect(outs.join("")).not.toContain("absorb");
+    expect(outs.join("")).not.toContain("cd".repeat(32));
+  });
+
   test("F-B23: the CLI's output boundaries redact (log and printResult)", async () => {
     const { log, printResult } = await import("../src/cli.ts");
     const words = "abandon ability able about above absent absorb abstract absurd abuse access accident";

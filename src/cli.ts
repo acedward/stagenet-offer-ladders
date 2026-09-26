@@ -24,7 +24,7 @@ import { takeServiceLock } from "./service-lock.ts";
 import { startWatchdog } from "./watchdog.ts";
 import { openMakerOps } from "./maker-ops.ts";
 import { loadMintRecords, type MintRecord, mintAll, registerDustAll, serializeMintRecords } from "./makers.ts";
-import { redact } from "./redact.ts";
+import { redact, redactDeep } from "./redact.ts";
 import { settleOffer } from "./settle.ts";
 import type { TokenId } from "./tokens.ts";
 import { verifyCurrentOffers } from "./verify.ts";
@@ -79,7 +79,9 @@ export const log = (line: string): void => {
 
 const jsonReplacer = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);
 export const printResult = (result: unknown): void => {
-  console.log(redact(JSON.stringify(result, jsonReplacer, 2)));
+  // Strings are redacted before serialisation (escapes would hide them), then the text again.
+  const safe = redactDeep(JSON.parse(JSON.stringify(result, jsonReplacer)));
+  console.log(redact(JSON.stringify(safe, null, 2)));
 };
 
 /** Write a public (non-secret) file atomically, creating its directory. */

@@ -233,7 +233,7 @@ const joinFields = (fields: Record<string, unknown>): string =>
   Object.entries(fields)
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([key, value]) => {
-      const text = typeof value === "bigint" ? value.toString() : String(value);
+      const text = redact(typeof value === "bigint" ? value.toString() : String(value)); // before quoting (F-B29)
       return `${key}=${/\s/u.test(text) ? JSON.stringify(text) : text}`;
     })
     .join(" ");
