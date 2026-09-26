@@ -126,6 +126,13 @@ describe("POST /v1/offers against the mock kernel", () => {
     expect(sleeps).toEqual([300_000]);
   });
 
+  test("F-A19: one call never sleeps longer in total than maxTotalSleepMs (default 10 min, below the watchdog)", async () => {
+    for (let i = 0; i < 6; i++) kernel.script.push({ status: 429, body: { error: "RATE_LIMITED" }, headers: { "retry-after": "300" } });
+    const c = new KernelClient({ baseUrl: kernel.url, sleep: async (ms) => { sleeps.push(ms); }, attempts: 6, random: () => 0.5 });
+    expect(await c.postOffer(blobOf(91))).toMatchObject({ kind: "unavailable" });
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(600_000);
+  });
+
   test("429 honours Retry-After", async () => {
     kernel.script.push({ status: 429, body: { error: "RATE_LIMITED" }, headers: { "retry-after": "7" } });
     expect(await client.postOffer(blobOf(9))).toMatchObject({ kind: "accepted", attempts: 2 });

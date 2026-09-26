@@ -95,6 +95,8 @@ export interface KernelClientOptions {
   readonly log?: (fields: Record<string, unknown>) => void;
   /** Upper bound on a server-requested `Retry-After` (default 300 s; audit C6). */
   readonly maxRetryAfterMs?: number;
+  /** Upper bound on the total sleep of one call (default 10 min, below the watchdog; audit F-A19). */
+  readonly maxTotalSleepMs?: number;
 }
 
 interface Answer {
@@ -137,6 +139,7 @@ export class KernelClient {
   readonly #random: () => number;
   readonly #log: (fields: Record<string, unknown>) => void;
   readonly #maxRetryAfterMs: number;
+  readonly #maxTotalSleepMs: number;
 
   constructor(options: KernelClientOptions) {
     if (!/^https?:\/\//u.test(options.baseUrl)) throw new Error("kernel client: baseUrl must be an http(s) URL");
@@ -152,6 +155,7 @@ export class KernelClient {
     this.#random = options.random ?? Math.random;
     this.#log = options.log ?? (() => undefined);
     this.#maxRetryAfterMs = options.maxRetryAfterMs ?? 300_000;
+    this.#maxTotalSleepMs = options.maxTotalSleepMs ?? 600_000;
   }
 
   /** A server `Retry-After`, capped (audit C6: a hostile or buggy 86400 must not stall us for a day). */
@@ -186,6 +190,13 @@ export class KernelClient {
 
   /** `POST /v1/offers { offer }` with the retry policy above. Never throws for HTTP answers. */
   async postOffer(blob: string): Promise<PostOutcome> {
+    let slept = 0;
+    const nap = async (ms: number): Promise<boolean> => {
+      if (slept + ms > this.#maxTotalSleepMs) return false;
+      slept += ms;
+      await this.#sleep(ms);
+      return true;
+    };
     let transportFailures = 0;
     let sameBlobRetries = 0;
     let attempts = 0;
@@ -203,8 +214,7 @@ export class KernelClient {
         transportFailures += 1;
         last = { error: `transport: ${(error as Error).message}` };
         this.#log({ phase: "post", attempt: attempts, result: "unreachable", detail: last.error });
-        if (transportFailures >= this.#attempts) return { kind: "unavailable", error: last.error, attempts };
-        await this.#sleep(this.backoffMs(transportFailures));
+        if (transportFailures >= this.#attempts || !(await nap(this.backoffMs(transportFailures)))) return { kind: "unavailable", error: last.error, attempts };
         continue;
       }
       const disposition = classifyPost(answer.status, answer.body);
@@ -227,15 +237,17 @@ export class KernelClient {
         sameBlobRetries += 1;
         last = { status: answer.status, code, error: `${answer.status} ${code}` };
         this.#log({ phase: "post", attempt: attempts, result: "retry-same", status: answer.status, code });
-        if (sameBlobRetries > this.#sameBlobRetries) return { kind: "unavailable", status: answer.status, code, error: last.error, attempts };
-        await this.#sleep(this.#sameBlobDelayMs);
+        if (sameBlobRetries > this.#sameBlobRetries || !(await nap(this.#sameBlobDelayMs))) {
+          return { kind: "unavailable", status: answer.status, code, error: last.error, attempts };
+        }
         continue;
       }
       transportFailures += 1;
       last = { status: answer.status, code, error: `${answer.status} ${code}` };
       this.#log({ phase: "post", attempt: attempts, result: "retry", status: answer.status, code });
-      if (transportFailures >= this.#attempts) return { kind: "unavailable", status: answer.status, code, error: last.error, attempts };
-      await this.#sleep(this.retryAfterDelay(answer.retryAfterMs, transportFailures));
+      if (transportFailures >= this.#attempts || !(await nap(this.retryAfterDelay(answer.retryAfterMs, transportFailures)))) {
+        return { kind: "unavailable", status: answer.status, code, error: last.error, attempts };
+      }
     }
   }
 

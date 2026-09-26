@@ -16,10 +16,15 @@ services:
   proof-server:
     image: midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
     restart: unless-stopped
+    # The image has no shell for a health check; the ladder waits for its /health at start
+    # and exits on a build timeout. If BUILD_TIMEOUT repeats, run: docker compose restart proof-server
 
   ladder:
     build: .
     image: stagenet-offer-ladders:${IMAGE_TAG:-local}
+    # A fixed hostname: after a crash or a recreate, service.lock's holder (same host, PID 1,
+    # another instance id) is recognised as dead and taken over (audit F-A18).
+    hostname: stagenet-offer-ladders
     restart: unless-stopped
     mem_limit: ${LADDER_MEM_LIMIT:-4g}
     depends_on:

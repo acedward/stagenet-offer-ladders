@@ -92,6 +92,26 @@ export const fundingLock = (purpose: string): { release(): void } => {
   return takeFundingLock(purpose);
 };
 
+/**
+ * Wait (up to `timeoutMs`) for the proof server's `/health` before the first tick (audit
+ * F-A19: the proof-server image has no shell for a Compose health check). Failing = exit, so
+ * the restart policy tries again.
+ */
+export const waitForProver = async (url: string, logLine: (line: string) => void, timeoutMs = 120_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const response = await fetch(new URL("/health", url), { signal: AbortSignal.timeout(5_000) });
+      if (response.ok) return;
+    } catch {
+      /* not up yet */
+    }
+    if (Date.now() >= deadline) throw new Error(`proof server ${url} not healthy after ${timeoutMs / 1000} s`);
+    logLine("waiting for the proof server");
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+};
+
 export interface ServiceConfig {
   readonly ladderFile: string;
   readonly ladders: LadderFile;
@@ -250,6 +270,7 @@ const createServiceLocked = async (config: ServiceConfig, logLine: (line: string
   const revived = journal.reviveDepleted();
   if (revived.length > 0) logLine(`re-checking depleted slots at startup: ${revived.join(", ")}`);
   const outbox = new Outbox(config.outboxDir);
+  await waitForProver(config.network.proofServerUrl, logLine);
   const { height, parameters } = await fetchLedgerParameters(config.network);
   logLine(`ledger parameters from block ${height}`);
   const mnemonics = new Map<string, string>();
