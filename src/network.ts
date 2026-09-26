@@ -45,6 +45,7 @@ export const fetchLedgerParameters = async (
   network: WalletNetwork,
 ): Promise<{ height: number; parameters: ledger.LedgerParameters }> => {
   const response = await fetch(network.indexerHttpUrl, {
+    signal: AbortSignal.timeout(30_000), // audit C6: no unbounded startup wait
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ query: "{ block { height ledgerParameters } }" }),
@@ -59,4 +60,18 @@ export const fetchLedgerParameters = async (
     height: block.height,
     parameters: ledger.LedgerParameters.deserialize(Buffer.from(block.ledgerParameters, "hex")),
   };
+};
+
+/** The node's `system_version` (JSON-RPC over HTTP), with a deadline. */
+export const fetchNodeVersion = async (network: WalletNetwork, timeoutMs = 30_000): Promise<string> => {
+  const response = await fetch(network.nodeUrl, {
+    signal: AbortSignal.timeout(timeoutMs),
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "system_version", params: [] }),
+  });
+  if (!response.ok) throw new Error(`node system_version: HTTP ${response.status}`);
+  const body = (await response.json()) as { result?: unknown };
+  if (typeof body.result !== "string") throw new Error("node system_version: no result");
+  return body.result;
 };

@@ -19,13 +19,14 @@
  * @module
  */
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { openJournal, type Journal } from "./journal.ts";
 import { KernelClient } from "./kernel-client.ts";
-import { buildSlots, type CoinPolicy, LadderConfigError, type LadderFile, readLadderFile, resolveColours, WALLET_MODES, type WalletMode } from "./ladder.ts";
+import { buildSlots, type CoinPolicy, LadderConfigError, type LadderFile, readLadderFile, resolveColours, validateColours, WALLET_MODES, type WalletMode } from "./ladder.ts";
 import { FUNDING_WALLET_ID, SessionPool } from "./ladder-wallet.ts";
-import { fetchLedgerParameters, stagenet, type WalletNetwork } from "./network.ts";
+import { fetchLedgerParameters, fetchNodeVersion, stagenet, type WalletNetwork } from "./network.ts";
+import { type ServiceLock, takeServiceLock } from "./service-lock.ts";
 import { Outbox } from "./outbox.ts";
 import { type Log, Scheduler, type SchedulerConfig, type SlotPlan, systemClock } from "./scheduler.ts";
 import { stateDir, takeFundingLock } from "./state.ts";
@@ -100,6 +101,11 @@ export interface ServiceConfig {
   readonly slots: readonly SlotPlan[];
   readonly scheduler: SchedulerConfig;
   readonly reconcileMs: number;
+  readonly stateDir: string;
+  /** Pinned node version; empty = no check (audit C12). */
+  readonly expectedNodeVersion: string;
+  /** Exit when no slot has made progress for this long (audit C6). */
+  readonly watchdogMs: number;
   readonly zswapApi: string | undefined;
   readonly journalFile: string;
   readonly outboxDir: string;
@@ -122,6 +128,7 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
   const tokensFile = env("TOKENS_FILE") ?? "deployments/stagenet.json";
   const resolved = existsSync(tokensFile) ? coloursFromDeployments(JSON.parse(readFileSync(tokensFile, "utf8")), Object.keys(ladders.tokens)) : {};
   const colours = resolveColours(ladders, resolved);
+  validateColours(ladders, colours);
   const network = stagenet();
   if (network.networkId !== ladders.networkId) throw new LadderConfigError(`ladder file is for ${ladders.networkId}, network is ${network.networkId}`);
   const slots: SlotPlan[] = buildSlots(ladders).map((slot) => ({
@@ -159,8 +166,17 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
       includeNonces: ladders.includeNonces ? new Set(ladders.includeNonces) : undefined,
       maxBuildsPerTick: maxBuilds === 0 ? Number.POSITIVE_INFINITY : maxBuilds,
       outboxRetentionMs: num("OUTBOX_RETENTION_HOURS", 168) * 3_600_000,
+      rootWindowMs: num("ROOT_WINDOW_MINUTES", 60, 1) * 60_000,
+      submitConfirmMs: num("SUBMIT_CONFIRM_SECONDS", 300, 1) * 1000,
+      buildTimeoutMs: num("BUILD_TIMEOUT_SECONDS", 300, 1) * 1000,
+      versionCheckEveryTicks: num("VERSION_CHECK_EVERY_TICKS", 10),
     },
     reconcileMs: num("RECONCILE_SECONDS", 60, 1) * 1000,
+    stateDir,
+    expectedNodeVersion: process.env["EXPECTED_NODE_VERSION"] ?? "2.0.0-d9729c13",
+    watchdogMs:
+      num("WATCHDOG_SECONDS", 0) * 1000 ||
+      Math.max(10 * 60_000, 3 * num("RECONCILE_SECONDS", 60, 1) * 1000 + 2 * num("BUILD_TIMEOUT_SECONDS", 300, 1) * 1000),
     zswapApi,
     journalFile: env("JOURNAL_FILE") ?? join(stateDir, `ladder.${mode}.journal.json`),
     outboxDir: env("OUTBOX_DIR") ?? join(stateDir, "outbox"),
@@ -180,6 +196,7 @@ export interface Service {
   readonly outbox: Outbox;
   readonly scheduler: Scheduler;
   readonly wallets: SessionPool;
+  readonly lock: ServiceLock;
   status?: StatusServer;
   close(): Promise<void>;
 }
@@ -196,6 +213,35 @@ export const formatFields = (fields: Record<string, unknown>): string =>
 
 export const createService = async (config: ServiceConfig, logLine: (line: string) => void): Promise<Service> => {
   const log: Log = (fields) => logLine(formatFields(fields));
+  // Audit C4: one process per state directory (journal writer + maker seeds).
+  const serviceLock = takeServiceLock(config.stateDir, "ladder service");
+  try {
+    return await createServiceLocked(config, logLine, log, serviceLock);
+  } catch (error) {
+    serviceLock.release();
+    throw error;
+  }
+};
+
+/** A journal of the OTHER wallet mode in the same directory that still claims coins (audit C1). */
+const otherModeClaims = (config: ServiceConfig): string | undefined => {
+  const other = config.mode === "single-wallet-pinned" ? "wallet-per-slot" : "single-wallet-pinned";
+  const file = join(dirname(config.journalFile), `ladder.${other}.journal.json`);
+  if (!existsSync(file)) return undefined;
+  try {
+    const data = JSON.parse(readFileSync(file, "utf8")) as { slots?: Record<string, { state?: string }> };
+    const claiming = Object.values(data.slots ?? {}).filter((s) => ["posting", "stored", "submitted", "live", "halted"].includes(String(s.state)));
+    return claiming.length > 0 ? `${file} still has ${claiming.length} outstanding offer(s)` : undefined;
+  } catch {
+    return `${file} is unreadable`;
+  }
+};
+
+const createServiceLocked = async (config: ServiceConfig, logLine: (line: string) => void, log: Log, serviceLock: ServiceLock): Promise<Service> => {
+  const conflict = otherModeClaims(config);
+  if (conflict !== undefined && !config.journalReset) {
+    throw new LadderConfigError(`refusing to start in ${config.mode}: ${conflict}; retire those offers first (or JOURNAL_RESET=true)`);
+  }
   const journal = openJournal({ file: config.journalFile, networkId: config.ladders.networkId, mode: config.mode, reset: config.journalReset });
   const revived = journal.reviveDepleted();
   if (revived.length > 0) logLine(`re-checking depleted slots at startup: ${revived.join(", ")}`);
@@ -210,6 +256,10 @@ export const createService = async (config: ServiceConfig, logLine: (line: strin
   } else {
     const makers = readMakersFile(config.makersFile);
     if (makers.networkId !== config.ladders.networkId) throw new LadderConfigError(`makers file is for ${makers.networkId}`);
+    // Audit C4: two slots must never share a wallet (identical mnemonics = identical identities).
+    if (new Set(makers.makers.map((m) => m.mnemonic)).size !== makers.makers.length) {
+      throw new LadderConfigError("the makers file has duplicate wallets (two slots derive the same identity)");
+    }
     for (const maker of makers.makers) mnemonics.set(maker.slot, maker.mnemonic);
     const missing = config.slots.filter((slot) => !mnemonics.has(slot.walletId)).map((slot) => slot.slot);
     if (missing.length > 0) throw new LadderConfigError(`no maker wallet for slot(s) ${missing.join(", ")}`);
@@ -227,6 +277,17 @@ export const createService = async (config: ServiceConfig, logLine: (line: strin
     kernel,
     clock: systemClock,
     log,
+    versionGuard:
+      config.expectedNodeVersion === ""
+        ? undefined
+        : async () => {
+            const actual = await fetchNodeVersion(config.network);
+            return actual === config.expectedNodeVersion ? null : `node version ${actual} != pinned ${config.expectedNodeVersion}`;
+          },
+    onFatal: (reason) => {
+      logLine(`fatal: ${reason}; exiting so the restart policy recovers`);
+      setTimeout(() => process.exit(70), 1_000).unref?.();
+    },
   });
   const service: Service = {
     config,
@@ -234,10 +295,12 @@ export const createService = async (config: ServiceConfig, logLine: (line: strin
     outbox,
     scheduler,
     wallets,
+    lock: serviceLock,
     async close() {
       await service.status?.stop().catch(() => undefined);
       await wallets.closeAll();
       lock?.release();
+      serviceLock.release();
     },
   };
   if (config.statusPort > 0) {
@@ -249,6 +312,7 @@ export const createService = async (config: ServiceConfig, logLine: (line: strin
         delivery: kernel ? "kernel" : "outbox",
         mode: config.mode,
         lastTickEndedAt: () => scheduler.lastProgressAt,
+        haltReason: () => scheduler.haltReason,
         inventory: (slot) => scheduler.inventory(slot),
         now: () => Date.now(),
       },

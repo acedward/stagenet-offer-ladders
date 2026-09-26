@@ -67,7 +67,7 @@ describe("journal round trip and transitions", () => {
     const j = open();
     j.ensureSlot(def("AB-01"));
     j.beginOffer("AB-01", ref("AB-01", 1));
-    expect(j.get("AB-01")!.state).toBe("posting");
+    expect(j.get("AB-01")!.state).toBe("stored");
     j.markLive("AB-01");
     j.endOffer("AB-01", "expired");
     expect(j.get("AB-01")!.coinNonce).toBe(ref("AB-01", 1).coinNonce); // kept for the re-offer
@@ -156,6 +156,55 @@ describe("journal files that must not be adopted", () => {
   });
 });
 
+describe("audit C2/C3", () => {
+  test("C2: corrupt → refused → restart still refused (quarantine) → explicit reset → starts", () => {
+    const file = join(dir, "state", "j.json");
+    open(file).ensureSlot(def("AB-01"));
+    writeFileSync(file, "{ not json");
+    expect(() => open(file)).toThrow(/quarantined/);
+    expect(existsSync(`${file}.quarantine`)).toBe(true);
+    // restart (the file is gone now): still refused
+    expect(() => open(file)).toThrow(/quarantined/);
+    expect(() => open(file)).toThrow(/quarantined/);
+    const fresh = open(file, { reset: true });
+    expect(fresh.slots()).toEqual([]);
+    expect(existsSync(`${file}.quarantine`)).toBe(false);
+    expect(() => open(file)).not.toThrow();
+  });
+
+  test("C3: a failed write leaves memory unchanged (candidate → persist → commit)", () => {
+    let fail = false;
+    const file = join(dir, "state", "j.json");
+    const j = openJournal({
+      file,
+      networkId: "stagenet",
+      mode: "wallet-per-slot",
+      write: (f, c) => {
+        if (fail) throw new Error("EIO");
+        writeFileSync(f, c);
+      },
+    });
+    j.ensureSlot(def("AB-01"));
+    fail = true;
+    expect(() => j.beginOffer("AB-01", ref("AB-01", 1))).toThrow(/EIO/);
+    expect(j.get("AB-01")!.state).toBe("idle");
+    expect(j.get("AB-01")!.current).toBeUndefined();
+    expect(j.claimedNonces().size).toBe(0);
+    fail = false;
+    j.beginOffer("AB-01", ref("AB-01", 1));
+    expect(open(file).get("AB-01")!.state).toBe("stored");
+  });
+
+  test("a journal written before the state rename (posting) loads as stored", () => {
+    const file = join(dir, "state", "j.json");
+    const j = open(file);
+    j.ensureSlot(def("AB-01"));
+    j.beginOffer("AB-01", ref("AB-01", 1));
+    writeFileSync(file, readFileSync(file, "utf8").replace('"state": "stored"', '"state": "posting"'));
+    expect(open(file).get("AB-01")!.state).toBe("stored");
+  });
+});
+
 describe("crash safety", () => {
   test("SIGKILL during continuous writes never leaves an unreadable journal (10 kills)", async () => {
     const file = join(dir, "crash", "j.json");
@@ -171,7 +220,7 @@ describe("crash safety", () => {
       const slots = j.slots();
       expect(slots.map((s) => s.slot).sort()).toEqual(["AB-01", "AB-02", "AB-03"]);
       for (const s of slots) {
-        if (s.state === "posting" || s.state === "live") expect(s.current?.offerId).toMatch(/^[0-9a-f]{64}$/);
+        if (s.state === "stored" || s.state === "live") expect(s.current?.offerId).toMatch(/^[0-9a-f]{64}$/);
       }
       const cycles = slots.reduce((sum, s) => sum + s.cycles, 0);
       expect(cycles).toBeGreaterThanOrEqual(lastCycles); // progress is never lost

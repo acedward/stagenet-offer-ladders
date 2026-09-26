@@ -18,6 +18,8 @@ export interface StatusSource {
   readonly delivery: "kernel" | "outbox";
   readonly mode: string;
   lastTickEndedAt(): number | undefined;
+  /** Set when the scheduler halted on a node/ledger version mismatch (audit C12). */
+  haltReason?: (() => string | undefined) | undefined;
   inventory(slot: string): { coins: number; value: bigint } | undefined;
   now(): number;
 }
@@ -57,6 +59,10 @@ export const statusRows = (source: StatusSource): StatusRow[] =>
   });
 
 export const isHealthy = (source: StatusSource, staleAfterMs: number): boolean => {
+  // Audit C6/C12: unhealthy when halted, or when every slot is in error.
+  if (source.haltReason?.() !== undefined) return false;
+  const slots = source.journal.slots();
+  if (slots.length > 0 && slots.every((slot) => slot.state === "error")) return false;
   const last = source.lastTickEndedAt();
   const reference = last ?? source.startedAt;
   // Before the first tick ends, allow a generous window (wallet sync takes minutes).
@@ -87,6 +93,7 @@ export const startStatusServer = (source: StatusSource, options: { port: number;
           delivery: source.delivery,
           now: new Date(source.now()).toISOString(),
           lastTickEndedAt: source.lastTickEndedAt() ? new Date(source.lastTickEndedAt()!).toISOString() : null,
+          halted: source.haltReason?.() ?? null,
           states: summary.byState,
           offersBuilt: summary.offersBuilt,
           slots: statusRows(source),

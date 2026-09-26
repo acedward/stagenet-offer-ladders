@@ -34,7 +34,8 @@ import type { CoinPolicy } from "./ladder.ts";
 import { type Journal, JournalError, REOFFER_STATES, type SlotDefinition, type SlotRecord } from "./journal.ts";
 import type { KernelOfferStatus, PostOutcome } from "./kernel-client.ts";
 import type { BuildOfferArgs, BuiltOffer, CoinRef } from "./offer-builder.ts";
-import type { Outbox, OutboxEntry } from "./outbox.ts";
+import { blobSha256, type Outbox, type OutboxEntry } from "./outbox.ts";
+import { redact } from "./redact.ts";
 
 // ---------------------------------------------------------------------------
 // Ports
@@ -59,9 +60,31 @@ export interface WalletPort {
   get(walletId: string): Promise<LadderWallet>;
 }
 
+/** A live offer as the kernel lists it (`GET /v1/offers?token=…&direction=GIVING`). */
+export interface KernelLiveOffer {
+  readonly offerId: string;
+  readonly inputNullifiers: readonly string[];
+  readonly expiresAt?: string | undefined;
+  readonly gives?: readonly { token: string; amount: string }[] | undefined;
+  readonly wants?: readonly { token: string; amount: string }[] | undefined;
+}
+
+/** Does a kernel offer have exactly this slot's legs (so the slot may adopt it)? */
+export const offerMatchesSlot = (offer: KernelLiveOffer, record: Pick<SlotRecord, "giveColour" | "giveAmount" | "wantColour" | "wantAmount">): boolean =>
+  offer.gives?.length === 1 &&
+  offer.wants?.length === 1 &&
+  offer.gives[0]!.token.toLowerCase() === record.giveColour &&
+  offer.gives[0]!.amount === record.giveAmount &&
+  offer.wants[0]!.token.toLowerCase() === record.wantColour &&
+  offer.wants[0]!.amount === record.wantAmount;
+
 export interface KernelPort {
   postOffer(blob: string): Promise<PostOutcome>;
   offerStatus(offerId: string): Promise<KernelOfferStatus>;
+  /** Every live offer giving one of `colours` (audit C1: adopt before posting). */
+  liveOffers(colours: readonly string[]): Promise<KernelLiveOffer[]>;
+  /** The `swapoffer1…` string of an offer the kernel holds, if any. */
+  offerBlob(offerId: string): Promise<string | undefined>;
 }
 
 export interface Clock {
@@ -106,6 +129,18 @@ export interface SchedulerConfig {
   readonly maxBuildsPerTick: number;
   /** Outbox entries of ended offers are removed after this long. */
   readonly outboxRetentionMs: number;
+  /**
+   * The node's Merkle-root window (audit C1/C7): an offer is proven dead only when the
+   * kernel says so, or when `builtAt + rootWindowMs + expiryGraceMs` has passed. A coin is
+   * never re-offered before that.
+   */
+  readonly rootWindowMs: number;
+  /** Re-post a `submitted` offer the kernel still does not know after this long. */
+  readonly submitConfirmMs: number;
+  /** A build (proof) that takes longer is abandoned and the process asked to exit. */
+  readonly buildTimeoutMs: number;
+  /** Check the node version every N ticks (0 = only the first tick). */
+  readonly versionCheckEveryTicks: number;
 }
 
 export interface SlotPlan extends SlotDefinition {
@@ -122,7 +157,31 @@ export interface SchedulerDeps {
   readonly kernel?: KernelPort | undefined;
   readonly clock: Clock;
   readonly log: Log;
+  /** Returns a problem string when the node/ledger version is not the pinned one (audit C12). */
+  readonly versionGuard?: (() => Promise<string | null>) | undefined;
+  /** Called when the process should exit so its restart policy recovers (audit C6). */
+  readonly onFatal?: ((reason: string) => void) | undefined;
 }
+
+/** Reject after `ms` with a `TimeoutError` (the underlying work cannot be cancelled). */
+export const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const error = new Error(`${label} timed out after ${ms} ms`);
+      error.name = "TimeoutError";
+      reject(error);
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 
 // ---------------------------------------------------------------------------
 // Tick
@@ -149,6 +208,8 @@ export interface TickReport {
   readonly errors: number;
   readonly depleted: number;
   readonly deferred: number;
+  readonly adopted: number;
+  readonly halted?: string;
   readonly slots: readonly SlotReport[];
 }
 
@@ -211,6 +272,9 @@ export class Scheduler {
   #lastTickEndedAt: number | undefined;
   #lastProgressAt: number | undefined;
   #inventory = new Map<string, { coins: number; value: bigint }>();
+  #haltReason: string | undefined;
+  #kernelLive: Map<string, KernelLiveOffer> | Error | undefined;
+  #publishBlocked: string | undefined;
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
@@ -230,6 +294,11 @@ export class Scheduler {
     return this.#lastProgressAt;
   }
 
+  /** Set when the node/ledger version guard failed (audit C12): nothing is built or posted. */
+  get haltReason(): string | undefined {
+    return this.#haltReason;
+  }
+
   inventory(slot: string): { coins: number; value: bigint } | undefined {
     return this.#inventory.get(slot);
   }
@@ -247,7 +316,7 @@ export class Scheduler {
     const { cfg, journal, clock, log } = this.deps;
     const tick = ++this.#tick;
     const startedAt = clock.now();
-    const counts = { built: 0, posted: 0, consumed: 0, expired: 0, rejected: 0, errors: 0, depleted: 0, deferred: 0 };
+    const counts = { built: 0, posted: 0, consumed: 0, expired: 0, rejected: 0, errors: 0, depleted: 0, deferred: 0, adopted: 0 };
     const snapshots = new Map<string, WalletSnapshot | Error>();
     const reports: SlotReport[] = [];
     log({ phase: "tick-start", tick, slots: this.deps.slots.length, delivery: this.deps.kernel ? "kernel" : "outbox" });
@@ -267,8 +336,38 @@ export class Scheduler {
       return result;
     };
 
+    // Audit C12: the node/ledger version guard. On a mismatch nothing is built or posted.
+    if (this.deps.versionGuard && (tick === 1 || (cfg.versionCheckEveryTicks > 0 && tick % cfg.versionCheckEveryTicks === 0))) {
+      try {
+        const problem = await this.deps.versionGuard();
+        if (problem !== this.#haltReason) log({ phase: "version", tick, result: problem === null ? "ok" : "halt", detail: problem ?? undefined });
+        this.#haltReason = problem ?? undefined;
+      } catch (error) {
+        log({ phase: "version", tick, result: "unreadable", detail: message(error) });
+      }
+    }
+    // Audit C1: in kernel mode, learn which coins the kernel already has live offers for,
+    // so a lost or fresh journal adopts them instead of posting twins.
+    this.#kernelLive = undefined;
+    this.#publishBlocked = undefined;
+    if (this.deps.kernel && this.#haltReason === undefined) {
+      try {
+        const colours = [...new Set(this.deps.slots.map((s) => s.giveColour))];
+        const live = await this.deps.kernel.liveOffers(colours);
+        this.#kernelLive = new Map<string, KernelLiveOffer>();
+        for (const offer of live) for (const n of offer.inputNullifiers) this.#kernelLive.set(n.toLowerCase(), offer);
+      } catch (error) {
+        this.#kernelLive = error instanceof Error ? error : new Error(String(error));
+        log({ phase: "kernel-live", tick, result: "unreadable", detail: message(error) });
+      }
+    }
+
     for (const plan of this.deps.slots) {
       if (this.#stopping) break;
+      if (this.#haltReason !== undefined) {
+        reports.push({ slot: plan.slot, before: journal.get(plan.slot)!.state, after: journal.get(plan.slot)!.state, actions: ["halted:version"] });
+        continue;
+      }
       const actions: string[] = [];
       const before = journal.get(plan.slot)!.state;
       try {
@@ -296,8 +395,8 @@ export class Scheduler {
       } catch (error) {
         // A bug or an unexpected journal refusal: surface it, never loop on it silently.
         counts.errors += 1;
-        actions.push(`exception:${message(error).slice(0, 120)}`);
-        log({ phase: "slot", tick, slot: plan.slot, result: "exception", detail: message(error) });
+        actions.push(`exception:${redact(message(error)).slice(0, 120)}`);
+        log({ phase: "slot", tick, slot: plan.slot, result: "exception", detail: redact(message(error)) });
       }
       this.#lastProgressAt = clock.now();
       const after = journal.get(plan.slot)!;
@@ -327,6 +426,7 @@ export class Scheduler {
       startedAt: new Date(startedAt).toISOString(),
       ms: clock.now() - startedAt,
       ...counts,
+      ...(this.#haltReason !== undefined ? { halted: this.#haltReason } : {}),
       slots: reports,
     };
     this.#lastReport = report;
@@ -334,6 +434,12 @@ export class Scheduler {
     this.#lastProgressAt = this.#lastTickEndedAt;
     log({ phase: "tick-end", tick, ms: report.ms, ...counts, states: JSON.stringify(journal.summary().byState) });
     return report;
+  }
+
+  /** A coin's previous offer is proven dead only at this time (audit C1/C7). */
+  #deadAt(current: { builtAt: string; expiresAt: string }): number {
+    const { cfg } = this.deps;
+    return Math.max(Date.parse(current.expiresAt), Date.parse(current.builtAt) + cfg.rootWindowMs) + cfg.expiryGraceMs;
   }
 
   async #reconcile(
@@ -345,7 +451,11 @@ export class Scheduler {
   ): Promise<void> {
     const { cfg, journal, clock, log, kernel } = this.deps;
     const record = journal.get(slot)!;
-    if (record.state !== "posting" && record.state !== "live") return;
+    if (record.state === "halted") {
+      actions.push("halted");
+      return;
+    }
+    if (record.state !== "stored" && record.state !== "submitted" && record.state !== "live") return;
     const current = record.current!;
     const snap = await snapshotOf(record.walletId);
     if (snap instanceof Error) {
@@ -361,13 +471,10 @@ export class Scheduler {
       return;
     }
     const now = clock.now();
-    const pastExpiry = now >= Date.parse(current.expiresAt) + cfg.expiryGraceMs;
+    const dead = now >= this.#deadAt(current);
     if (kernel === undefined) {
-      if (record.state === "posting") {
-        journal.markLive(slot);
-        actions.push("live(outbox)");
-      }
-      if (pastExpiry) {
+      // Outbox mode: the offer stays `stored` (in the outbox) until it is provably dead.
+      if (dead) {
         journal.endOffer(slot, "expired");
         counts.expired += 1;
         actions.push("expired");
@@ -392,7 +499,7 @@ export class Scheduler {
     if (status === "consumed" || status === "cancelled") {
       // The coin is still in the wallet: its view lags the kernel's. Wait for the wallet.
       actions.push(`kernel-${status}-awaiting-wallet`);
-      if (pastExpiry) {
+      if (dead) {
         journal.endOffer(slot, "expired", { code: `KERNEL_${status.toUpperCase()}` });
         counts.expired += 1;
         actions.push("expired");
@@ -400,31 +507,40 @@ export class Scheduler {
       return;
     }
     if (status === "live") {
-      if (record.state === "posting") {
+      if (record.state !== "live") {
         journal.markLive(slot);
         actions.push("live(kernel)");
       }
       return;
     }
     // not_found / unknown
-    if (pastExpiry) {
+    if (dead) {
       journal.endOffer(slot, "expired", { code: "NOT_FOUND_AFTER_EXPIRY" });
       counts.expired += 1;
       actions.push("expired");
       return;
     }
-    if (record.state === "posting") {
-      // Built and stored, never acknowledged (crash, or the kernel was down): re-post the
-      // SAME blob. Never build a second offer on this coin.
-      const entry = this.deps.outbox.get(current.offerId);
-      if (entry === undefined) {
-        journal.endOffer(slot, "error", { code: "OUTBOX_MISSING", message: "stored blob missing", retryAt: new Date(now) });
-        counts.errors += 1;
-        actions.push("outbox-missing");
-        return;
-      }
-      await this.#post(slot, entry, tick, actions, counts);
+    // Audit C7: publish what is stored (covers the outbox → kernel switch), re-post a
+    // `live` offer the kernel lost, and re-post a `submitted` one that was never indexed.
+    // Always the SAME blob: the kernel answers DUPLICATE_OFFER if it already holds it.
+    const waitedLongEnough =
+      record.state !== "submitted" || current.postedAt === undefined || now - Date.parse(current.postedAt) >= cfg.submitConfirmMs;
+    if (!waitedLongEnough) {
+      actions.push("awaiting-index");
+      return;
     }
+    const entry = this.deps.outbox.get(current.offerId);
+    if (entry === undefined) {
+      actions.push("outbox-missing");
+      log({ phase: "reconcile", tick, slot, offerId: short(current.offerId), result: "outbox_missing" });
+      return; // the coin stays claimed until the offer is provably dead
+    }
+    if (this.#publishBlocked !== undefined) {
+      actions.push("publish-blocked");
+      return;
+    }
+    actions.push(record.state === "stored" ? "publish" : "re-post");
+    await this.#post(slot, entry, tick, actions, counts);
   }
 
   async #offer(
@@ -432,17 +548,88 @@ export class Scheduler {
     snap: WalletSnapshot,
     tick: number,
     actions: string[],
-    counts: { built: number; posted: number; rejected: number; errors: number; depleted: number; consumed: number },
+    counts: { built: number; posted: number; rejected: number; errors: number; depleted: number; consumed: number; adopted: number },
   ): Promise<void> {
     const { cfg, journal, clock, log } = this.deps;
     const slot = record.slot;
+    if (this.#publishBlocked !== undefined) {
+      actions.push("publish-blocked");
+      return;
+    }
+    if (this.deps.kernel !== undefined && !(this.#kernelLive instanceof Map)) {
+      // Cannot prove the kernel holds no live offer for our coins: do not build (audit C1).
+      actions.push("kernel-live-unknown");
+      return;
+    }
     const taken = new Set<string>([...journal.claimedNonces(slot), ...journal.assignedNonces(slot)]);
-    const coin = chooseCoin(record, snap, cfg, taken);
+    // Audit C1: coins the kernel already holds a live offer for. One with exactly this
+    // slot's legs is ADOPTED; any other is never built on until its offer is dead.
+    const kernelHeld = new Map<string, KernelLiveOffer>();
+    if (this.#kernelLive instanceof Map) {
+      const adopted = new Set(journal.slots().flatMap((r) => (r.current ? [r.current.offerId] : [])));
+      for (const c of snap.spendable) {
+        const offer = this.#kernelLive.get(c.nullifier);
+        if (offer !== undefined && !adopted.has(offer.offerId)) kernelHeld.set(c.nonce, offer);
+      }
+    }
+    const adoptable = chooseCoin(record, { spendable: snap.spendable.filter((c) => {
+      const offer = kernelHeld.get(c.nonce);
+      return offer !== undefined && offerMatchesSlot(offer, record);
+    }), owned: snap.owned }, cfg, taken);
+    const coin = adoptable ?? chooseCoin(record, snap, cfg, new Set([...taken, ...kernelHeld.keys()]));
     if (coin === undefined) {
+      if (chooseCoin(record, snap, cfg, taken) !== undefined) {
+        actions.push("coins-held-by-kernel"); // wait until those offers are dead
+        return;
+      }
       journal.markDepleted(slot, `no ${cfg.coinPolicy === "exact" ? "exact" : "large enough"} ${short(record.giveColour)} coin of ${record.giveAmount}`);
       counts.depleted += 1;
       actions.push("depleted");
       log({ phase: "offer", tick, slot, result: "depleted" });
+      return;
+    }
+    const held = adoptable !== undefined ? kernelHeld.get(coin.nonce) : undefined;
+    if (held !== undefined) {
+      const blob = await this.deps.kernel!.offerBlob(held.offerId).catch(() => undefined);
+      const now = new Date(clock.now());
+      const expiresAt = held.expiresAt ?? new Date(now.getTime() + cfg.rootWindowMs).toISOString();
+      if (blob !== undefined) {
+        this.deps.outbox.put({
+          version: 1,
+          offerId: held.offerId,
+          blob,
+          blobSha256: blobSha256(blob),
+          networkId: cfg.networkId,
+          slot,
+          walletId: record.walletId,
+          coinNonce: coin.nonce,
+          coinNullifier: coin.nullifier,
+          giveColour: record.giveColour,
+          giveAmount: record.giveAmount,
+          wantColour: record.wantColour,
+          wantAmount: record.wantAmount,
+          price: record.price,
+          ttlSec: Math.round(cfg.offerTtlMs / 1000),
+          builtAt: now.toISOString(),
+          expiresAt,
+        });
+      }
+      journal.adoptOffer(slot, {
+        offerId: held.offerId,
+        blobSha256: blob !== undefined ? blobSha256(blob) : "",
+        delivery: "kernel",
+        coinNonce: coin.nonce,
+        coinNullifier: coin.nullifier,
+        coinValue: coin.value.toString(),
+        giveAmount: record.giveAmount,
+        wantAmount: record.wantAmount,
+        ttlSec: Math.round(cfg.offerTtlMs / 1000),
+        builtAt: now.toISOString(),
+        expiresAt,
+      });
+      counts.adopted += 1;
+      actions.push("adopted");
+      log({ phase: "offer", tick, slot, nonce: short(coin.nonce), offerId: short(held.offerId), result: "adopted" });
       return;
     }
     const wallet = await this.deps.wallets.get(record.walletId);
@@ -450,22 +637,37 @@ export class Scheduler {
     const buildStarted = clock.now();
     let built: BuiltOffer;
     try {
-      built = await wallet.build({
-        giveColour: record.giveColour,
-        giveAmount: BigInt(record.giveAmount),
-        coin,
-        wantColour: record.wantColour,
-        wantAmount: BigInt(record.wantAmount),
-        ttlMs: cfg.offerTtlMs,
-        now,
-      });
+      built = await withTimeout(
+        wallet.build({
+          giveColour: record.giveColour,
+          giveAmount: BigInt(record.giveAmount),
+          coin,
+          wantColour: record.wantColour,
+          wantAmount: BigInt(record.wantAmount),
+          ttlMs: cfg.offerTtlMs,
+          now,
+        }),
+        cfg.buildTimeoutMs,
+        "offer build",
+      );
     } catch (error) {
       const failures = record.consecutiveFailures + 1;
-      const code = error instanceof Error && error.name === "WrongInputError" ? "WRONG_INPUT_NULLIFIER" : "BUILD_FAILED";
-      journal.markError(slot, code, message(error), new Date(clock.now() + retryDelayMs(cfg, failures)));
+      const code =
+        error instanceof Error && error.name === "WrongInputError"
+          ? "WRONG_INPUT_NULLIFIER"
+          : error instanceof Error && error.name === "TimeoutError"
+            ? "BUILD_TIMEOUT"
+            : "BUILD_FAILED";
+      journal.markError(slot, code, redact(message(error)), new Date(clock.now() + retryDelayMs(cfg, failures)));
       counts.errors += 1;
       actions.push(`error:${code}`);
-      log({ phase: "build", tick, slot, nonce: short(coin.nonce), result: "error", code, detail: message(error) });
+      log({ phase: "build", tick, slot, nonce: short(coin.nonce), result: "error", code, detail: redact(message(error)) });
+      if (code === "BUILD_TIMEOUT") {
+        // A hung proof cannot be cancelled and keeps the wallet's pin armed: exit so the
+        // restart policy recovers (audit C6).
+        this.stop();
+        this.deps.onFatal?.(`offer build for ${slot} timed out after ${cfg.buildTimeoutMs} ms`);
+      }
       return;
     }
     counts.built += 1;
@@ -489,30 +691,40 @@ export class Scheduler {
       builtAt: built.builtAt.toISOString(),
       expiresAt: built.expiresAt.toISOString(),
     };
-    this.deps.outbox.put(entry);
-    journal.beginOffer(slot, {
-      offerId: built.offerId,
-      blobSha256: built.blobSha256,
-      delivery: this.deps.kernel ? "kernel" : "outbox",
-      coinNonce: coin.nonce,
-      coinNullifier: coin.nullifier,
-      coinValue: coin.value.toString(),
-      giveAmount: record.giveAmount,
-      wantAmount: record.wantAmount,
-      ttlSec: entry.ttlSec,
-      builtAt: entry.builtAt,
-      expiresAt: entry.expiresAt,
-    });
+    try {
+      this.deps.outbox.put(entry);
+      journal.beginOffer(slot, {
+        offerId: built.offerId,
+        blobSha256: built.blobSha256,
+        delivery: this.deps.kernel ? "kernel" : "outbox",
+        coinNonce: coin.nonce,
+        coinNullifier: coin.nullifier,
+        coinValue: coin.value.toString(),
+        giveAmount: record.giveAmount,
+        wantAmount: record.wantAmount,
+        ttlSec: entry.ttlSec,
+        builtAt: entry.builtAt,
+        expiresAt: entry.expiresAt,
+      });
+    } catch (error) {
+      // Audit C3: the claim is not durable → release the recipe, publish nothing more
+      // this tick, and let the next tick retry once storage works again.
+      await wallet.release(built.recipe).catch(() => undefined);
+      this.#publishBlocked = message(error);
+      counts.errors += 1;
+      actions.push("persist-failed");
+      log({ phase: "persist", tick, slot, offerId: short(built.offerId), result: "error", detail: redact(message(error)) });
+      return;
+    }
     actions.push("built");
     try {
       await wallet.release(built.recipe);
     } catch (error) {
-      log({ phase: "release", tick, slot, result: "error", detail: message(error) });
+      log({ phase: "release", tick, slot, result: "error", detail: redact(message(error)) });
     }
     if (this.deps.kernel === undefined) {
-      journal.markLive(slot);
       counts.posted += 1;
-      actions.push("live(outbox)");
+      actions.push("stored(outbox)");
       log({ phase: "outbox", tick, slot, offerId: short(built.offerId), expiresAt: entry.expiresAt });
       return;
     }
@@ -530,18 +742,16 @@ export class Scheduler {
     const outcome = await kernel!.postOffer(entry.blob);
     if (outcome.kind === "accepted") {
       if (outcome.offerId !== undefined && outcome.offerId !== entry.offerId) {
-        journal.endOffer(slot, "error", {
-          code: "OFFER_ID_MISMATCH",
-          message: `kernel offerId ${outcome.offerId} != local ${entry.offerId}`,
-          retryAt: new Date(clock.now() + retryDelayMs(cfg, (journal.get(slot)?.consecutiveFailures ?? 0) + 1)),
-        });
+        // Audit C7/A13: the kernel hashes different bytes. Keep the coin CLAIMED (halt the
+        // slot) instead of freeing it for a second offer.
+        journal.halt(slot, "OFFER_ID_MISMATCH", `kernel offerId ${outcome.offerId} != local ${entry.offerId}`);
         counts.errors += 1;
-        actions.push("error:OFFER_ID_MISMATCH");
+        actions.push("halted:OFFER_ID_MISMATCH");
         return;
       }
-      journal.markLive(slot);
+      journal.markSubmitted(slot);
       counts.posted += 1;
-      actions.push(outcome.duplicate ? "live(duplicate)" : "live(kernel)");
+      actions.push(outcome.duplicate ? "submitted(duplicate)" : "submitted");
       log({ phase: "post", tick, slot, offerId: short(entry.offerId), result: outcome.duplicate ? "duplicate" : "accepted", attempts: outcome.attempts });
       return;
     }
@@ -554,7 +764,7 @@ export class Scheduler {
         const failures = (journal.get(slot)?.consecutiveFailures ?? 0) + 1;
         journal.endOffer(slot, "rejected", {
           code: outcome.code,
-          message: `${outcome.status} ${outcome.refusal}: ${outcome.reason}`,
+          message: redact(`${outcome.status} ${outcome.refusal}: ${outcome.reason}`),
           retryAt: new Date(clock.now() + retryDelayMs(cfg, failures)),
         });
         counts.rejected += 1;
@@ -563,14 +773,14 @@ export class Scheduler {
       log({ phase: "post", tick, slot, offerId: short(entry.offerId), result: "rejected", status: outcome.status, code: outcome.code, refusal: outcome.refusal });
       return;
     }
-    // unavailable: stay `posting`; the next tick re-posts the same blob.
+    // unavailable: keep the claim; the next tick re-posts the same blob.
     try {
       journal.notePostAttempt(slot, outcome.code);
     } catch (error) {
       if (!(error instanceof JournalError)) throw error;
     }
     actions.push("post-unavailable");
-    log({ phase: "post", tick, slot, offerId: short(entry.offerId), result: "unavailable", detail: outcome.error });
+    log({ phase: "post", tick, slot, offerId: short(entry.offerId), result: "unavailable", detail: redact(outcome.error) });
   }
 
   /** Run ticks every `intervalMs` until `stop()`; a tick in progress finishes its current slot. */

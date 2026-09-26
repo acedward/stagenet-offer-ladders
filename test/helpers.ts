@@ -50,6 +50,8 @@ export class FakeClock implements Clock {
 export interface FakeOfferPayload {
   readonly wallet: string;
   readonly inputs: readonly string[];
+  /** Output commitments (fresh per build, like the SDK's `createShieldedCoinInfo` nonces). */
+  readonly outputs?: readonly string[];
   readonly nonce: string;
   readonly give: string;
   readonly giveAmount: string;
@@ -114,6 +116,7 @@ export class FakeWallet implements LadderWallet {
             wantAmount: args.wantAmount.toString(),
             ttl: args.ttl.toISOString(),
             n: this.#counter,
+            outputs: [hex64(`out:${this.walletId}:${this.#counter}:${Math.random()}`)],
           } satisfies FakeOfferPayload,
         };
       },
@@ -166,12 +169,23 @@ export interface MockOffer {
   readonly offerId: string;
   readonly blob: string;
   readonly nullifiers: readonly string[];
+  readonly outputs: readonly string[];
+  readonly give?: string | undefined;
+  readonly giveAmount?: string | undefined;
+  readonly want?: string | undefined;
+  readonly wantAmount?: string | undefined;
   status: KernelOfferStatus;
   readonly postedAt: number;
 }
 
 export type Scripted = { status: number; body: unknown; headers?: Record<string, string> } | "drop";
 
+/**
+ * A mock kernel faithful to `API.md` @ 67db767 "Dedup is two rules" (audit C1):
+ * `409 DUPLICATE_OFFER` for byte-identical content, `409 DUPLICATE_MARKERS` when a
+ * DECLARED OUTPUT marker overlaps a live offer. Input nullifiers are NOT deduplicated:
+ * the real kernel accepts two live offers spending the same coin.
+ */
 export class MockKernel {
   readonly offers = new Map<string, MockOffer>();
   /** Responses to serve for the next POSTs, in order, before the normal logic. */
@@ -180,6 +194,7 @@ export class MockKernel {
   readonly posts: string[] = [];
   statusCalls = 0;
   successStatus = 200;
+  listUnavailable = false;
   #server: ReturnType<typeof Bun.serve> | undefined;
 
   get url(): string {
@@ -201,6 +216,22 @@ export class MockKernel {
             return new Response(JSON.stringify(scripted.body), { status: scripted.status, headers: scripted.headers ?? {} });
           }
           return this.#accept(body.offer ?? "");
+        }
+        if (request.method === "GET" && url.pathname === "/v1/offers") {
+          if (this.listUnavailable) return new Response("down", { status: 503 });
+          const token = url.searchParams.get("token");
+          const offers = [...this.offers.values()]
+            .filter((o) => o.status === "live" && (token === null || o.give === token))
+            .map((o) => ({
+              offerId: o.offerId,
+              computed: {
+                gives: o.give ? [{ token: o.give, amount: o.giveAmount, type: "SHIELDED" }] : [],
+                wants: o.want ? [{ token: o.want, amount: o.wantAmount, type: "SHIELDED" }] : [],
+                inputNullifiers: o.nullifiers,
+                status: o.status,
+              },
+            }));
+          return Response.json({ offers, nextCursor: null });
         }
         const match = /^\/v1\/offers\/([0-9a-f]{64})(\/status)?$/u.exec(url.pathname);
         if (request.method === "GET" && match) {
@@ -226,13 +257,24 @@ export class MockKernel {
     const offerId = OfferFiles.offerId(raw);
     if (this.offers.has(offerId)) return Response.json({ error: "DUPLICATE_OFFER", offerId }, { status: 409 });
     const payload = JSON.parse(new TextDecoder().decode(raw)) as FakeOfferPayload;
-    // One live offer per input nullifier (what the plan relies on).
+    const outputs = payload.outputs ?? [];
     for (const existing of this.offers.values()) {
-      if (existing.status === "live" && existing.nullifiers.some((n) => payload.inputs.includes(n))) {
+      if (existing.status === "live" && existing.outputs.some((m) => outputs.includes(m))) {
         return Response.json({ error: "DUPLICATE_MARKERS", offerId, activeOfferId: existing.offerId }, { status: 409 });
       }
     }
-    this.offers.set(offerId, { offerId, blob, nullifiers: payload.inputs, status: "live", postedAt: Date.now() });
+    this.offers.set(offerId, {
+      offerId,
+      blob,
+      nullifiers: payload.inputs,
+      outputs,
+      give: payload.give,
+      giveAmount: payload.giveAmount,
+      want: payload.want,
+      wantAmount: payload.wantAmount,
+      status: "live",
+      postedAt: Date.now(),
+    });
     return Response.json({ success: true, offerId, result: {} }, { status: this.successStatus });
   }
 

@@ -93,6 +93,8 @@ export interface KernelClientOptions {
   readonly timeoutMs?: number;
   readonly random?: () => number;
   readonly log?: (fields: Record<string, unknown>) => void;
+  /** Upper bound on a server-requested `Retry-After` (default 300 s; audit C6). */
+  readonly maxRetryAfterMs?: number;
 }
 
 interface Answer {
@@ -109,6 +111,19 @@ const parseRetryAfter = (value: string | null): number | undefined => {
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 };
 
+interface Leg {
+  readonly token: string;
+  readonly amount: string;
+}
+
+export interface LiveOfferRow {
+  readonly offerId: string;
+  readonly inputNullifiers: string[];
+  readonly expiresAt?: string;
+  readonly gives: Leg[];
+  readonly wants: Leg[];
+}
+
 export class KernelClient {
   readonly baseUrl: string;
   readonly #fetch: typeof fetch;
@@ -121,6 +136,7 @@ export class KernelClient {
   readonly #timeoutMs: number;
   readonly #random: () => number;
   readonly #log: (fields: Record<string, unknown>) => void;
+  readonly #maxRetryAfterMs: number;
 
   constructor(options: KernelClientOptions) {
     if (!/^https?:\/\//u.test(options.baseUrl)) throw new Error("kernel client: baseUrl must be an http(s) URL");
@@ -135,6 +151,12 @@ export class KernelClient {
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#random = options.random ?? Math.random;
     this.#log = options.log ?? (() => undefined);
+    this.#maxRetryAfterMs = options.maxRetryAfterMs ?? 300_000;
+  }
+
+  /** A server `Retry-After`, capped (audit C6: a hostile or buggy 86400 must not stall us for a day). */
+  retryAfterDelay(retryAfterMs: number | undefined, attempt: number): number {
+    return Math.min(this.#maxRetryAfterMs, Math.max(retryAfterMs ?? 0, this.backoffMs(attempt)));
   }
 
   /** Backoff before attempt `n + 1` (n ≥ 1): base·2^(n−1), capped, ±25 % jitter. */
@@ -213,7 +235,7 @@ export class KernelClient {
       last = { status: answer.status, code, error: `${answer.status} ${code}` };
       this.#log({ phase: "post", attempt: attempts, result: "retry", status: answer.status, code });
       if (transportFailures >= this.#attempts) return { kind: "unavailable", status: answer.status, code, error: last.error, attempts };
-      await this.#sleep(Math.max(answer.retryAfterMs ?? 0, this.backoffMs(transportFailures)));
+      await this.#sleep(this.retryAfterDelay(answer.retryAfterMs, transportFailures));
     }
   }
 
@@ -236,8 +258,51 @@ export class KernelClient {
       }
       failures += 1;
       if (failures >= this.#attempts) throw new Error(`GET /v1/offers/${offerId}/status unavailable: ${error ?? answer?.status}`);
-      await this.#sleep(Math.max(answer?.retryAfterMs ?? 0, this.backoffMs(failures)));
+      await this.#sleep(this.retryAfterDelay(answer?.retryAfterMs, failures));
     }
+  }
+
+  /**
+   * Every live offer giving one of `colours` (`GET /v1/offers?token=…&direction=GIVING`,
+   * following the keyset cursor). Throws if the kernel cannot be read: callers must not
+   * build new offers without this view (audit C1).
+   */
+  async liveOffers(colours: readonly string[]): Promise<LiveOfferRow[]> {
+    const out: LiveOfferRow[] = [];
+    for (const colour of colours) {
+      let cursor: string | null = null;
+      for (let page = 0; page < 100; page++) {
+        const suffix = cursor ? `&after_hash=${cursor}` : "";
+        const answer = await this.#request(`/v1/offers?token=${colour}&direction=GIVING&limit=100${suffix}`, { method: "GET" });
+        if (answer.status !== 200) throw new Error(`GET /v1/offers → ${answer.status}`);
+        const body = answer.body as {
+          offers?: { offerId?: string; computed?: { inputNullifiers?: string[]; expiresAt?: string | null; status?: string; gives?: Leg[]; wants?: Leg[] } }[];
+          nextCursor?: string | null;
+        };
+        for (const offer of body.offers ?? []) {
+          if (typeof offer.offerId !== "string") continue;
+          if (offer.computed?.status !== undefined && offer.computed.status !== "live") continue;
+          out.push({
+            offerId: offer.offerId.toLowerCase(),
+            inputNullifiers: (offer.computed?.inputNullifiers ?? []).map((n) => String(n).toLowerCase()),
+            ...(offer.computed?.expiresAt ? { expiresAt: offer.computed.expiresAt } : {}),
+            gives: (offer.computed?.gives ?? []).map((l) => ({ token: String(l.token).toLowerCase(), amount: String(l.amount) })),
+            wants: (offer.computed?.wants ?? []).map((l) => ({ token: String(l.token).toLowerCase(), amount: String(l.amount) })),
+          });
+        }
+        cursor = body.nextCursor ?? null;
+        if (!cursor) break;
+      }
+    }
+    return out;
+  }
+
+  /** The `swapoffer1…` string of an offer (`GET /v1/offers/:hash` → `offerBech32`). */
+  async offerBlob(offerId: string): Promise<string | undefined> {
+    const answer = await this.#request(`/v1/offers/${offerId}`, { method: "GET" });
+    if (answer.status !== 200) return undefined;
+    const blob = (answer.body as { offerBech32?: unknown } | null)?.offerBech32;
+    return typeof blob === "string" ? blob : undefined;
   }
 
   /** `GET /v1/offers/:hash` (the kernel's view, incl. `computed.inputNullifiers`). */

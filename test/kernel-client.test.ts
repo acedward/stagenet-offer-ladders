@@ -6,8 +6,8 @@ import { OfferFiles } from "@effectstream/mip-zswap-offer/mip5";
 import { classifyPost, KernelClient, mapKernelStatus, refusalCode, refusalKind } from "../src/kernel-client.ts";
 import { MockKernel } from "./helpers.ts";
 
-const blobOf = (n: number, inputs = [`nullifier-${n}`]): string =>
-  OfferFiles.encode(new TextEncoder().encode(JSON.stringify({ inputs, n })));
+const blobOf = (n: number, inputs = [`nullifier-${n}`], outputs = [`output-${n}`]): string =>
+  OfferFiles.encode(new TextEncoder().encode(JSON.stringify({ inputs, outputs, n })));
 
 let kernel: MockKernel;
 let sleeps: number[];
@@ -83,9 +83,14 @@ describe("POST /v1/offers against the mock kernel", () => {
     expect(kernel.posts).toHaveLength(2);
   });
 
-  test("409 conflict (a live offer already spends the coin) is rejected and NEVER retried", async () => {
-    await client.postOffer(blobOf(4, ["same-coin"]));
-    const conflict = await client.postOffer(blobOf(5, ["same-coin"]));
+  test("API.md: a second live offer on the SAME input is accepted (no input dedup)", async () => {
+    await client.postOffer(blobOf(40, ["same-coin"]));
+    expect(await client.postOffer(blobOf(41, ["same-coin"]))).toMatchObject({ kind: "accepted", duplicate: false });
+  });
+
+  test("409 conflict (a declared output marker overlaps a live offer) is rejected and NEVER retried", async () => {
+    await client.postOffer(blobOf(4, ["coin-4"], ["shared-output"]));
+    const conflict = await client.postOffer(blobOf(5, ["coin-5"], ["shared-output"]));
     expect(conflict).toMatchObject({ kind: "rejected", status: 409, code: "DUPLICATE_MARKERS", refusal: "CONFLICT", attempts: 1 });
     expect(kernel.posts).toHaveLength(2);
     expect(sleeps).toEqual([]);
@@ -113,6 +118,12 @@ describe("POST /v1/offers against the mock kernel", () => {
     const outcome = await client.postOffer(blobOf(8));
     expect(outcome).toMatchObject({ kind: "unavailable", status: 502, attempts: 4 });
     expect(sleeps).toEqual([1000, 2000, 4000]);
+  });
+
+  test("Retry-After is capped (86400 s → 300 s)", async () => {
+    kernel.script.push({ status: 429, body: { error: "RATE_LIMITED" }, headers: { "retry-after": "86400" } });
+    expect(await client.postOffer(blobOf(90))).toMatchObject({ kind: "accepted", attempts: 2 });
+    expect(sleeps).toEqual([300_000]);
   });
 
   test("429 honours Retry-After", async () => {

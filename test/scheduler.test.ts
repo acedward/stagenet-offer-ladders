@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { openJournal } from "../src/journal.ts";
+import { openJournal, writeAtomic } from "../src/journal.ts";
 import { KernelClient } from "../src/kernel-client.ts";
 import { Outbox } from "../src/outbox.ts";
 import { chooseCoin, retryDelayMs, Scheduler, type SchedulerConfig, type SlotPlan } from "../src/scheduler.ts";
@@ -37,6 +37,10 @@ const cfg = (extra: Partial<SchedulerConfig> = {}): SchedulerConfig => ({
   excludeNonces: new Set(),
   maxBuildsPerTick: Number.POSITIVE_INFINITY,
   outboxRetentionMs: 7 * 24 * HOUR,
+  rootWindowMs: HOUR,
+  submitConfirmMs: 5 * 60_000,
+  buildTimeoutMs: 60_000,
+  versionCheckEveryTicks: 0,
   ...extra,
 });
 
@@ -93,10 +97,19 @@ const rig = (options: {
   kernelClient?: KernelClient;
   clock?: FakeClock;
   journalFile?: string;
+  write?: (file: string, contents: string) => void;
+  versionGuard?: () => Promise<string | null>;
+  onFatal?: (reason: string) => void;
 }): Rig => {
   const clock = options.clock ?? new FakeClock();
   const journalFile = options.journalFile ?? join(dir, "state", "journal.json");
-  const journal = openJournal({ file: journalFile, networkId: "stagenet", mode: options.config?.mode ?? "single-wallet-pinned", now: () => new Date(clock.now()) });
+  const journal = openJournal({
+    file: journalFile,
+    networkId: "stagenet",
+    mode: options.config?.mode ?? "single-wallet-pinned",
+    now: () => new Date(clock.now()),
+    ...(options.write ? { write: options.write } : {}),
+  });
   const outbox = new Outbox(join(dir, "state", "outbox"));
   const logs: Record<string, unknown>[] = [];
   const scheduler = new Scheduler({
@@ -108,6 +121,8 @@ const rig = (options: {
     kernel: options.kernelClient,
     clock,
     log: (fields) => logs.push(fields),
+    versionGuard: options.versionGuard,
+    onFatal: options.onFatal,
   });
   return { scheduler, clock, outbox, journalFile, logs };
 };
@@ -146,7 +161,7 @@ describe("single-wallet-pinned, outbox mode (the P3 shape)", () => {
     const report = await scheduler.runTick();
     expect(report).toMatchObject({ built: 6, posted: 6, errors: 0, depleted: 0 });
     const records = scheduler.deps.journal.slots();
-    expect(records.every((r) => r.state === "live")).toBe(true);
+    expect(records.every((r) => r.state === "stored")).toBe(true);
     const nonces = records.map((r) => r.current!.coinNonce);
     expect(new Set(nonces).size).toBe(6);
     const reserves = [coin(COLOUR_B, "Breserve", 1n).nonce, coin(COLOUR_C, "Creserve", 1n).nonce];
@@ -176,7 +191,7 @@ describe("single-wallet-pinned, outbox mode (the P3 shape)", () => {
     const refresh = await scheduler.runTick();
     expect(refresh).toMatchObject({ expired: 6, built: 6, posted: 6 });
     for (const record of scheduler.deps.journal.slots()) {
-      expect(record.state).toBe("live");
+      expect(record.state).toBe("stored");
       expect(record.current!.coinNonce).toBe(first.get(record.slot)!.coinNonce);
       expect(record.current!.offerId).not.toBe(first.get(record.slot)!.offerId);
       expect(record.history.map((h) => h.outcome)).toEqual(["expired"]);
@@ -194,7 +209,7 @@ describe("single-wallet-pinned, outbox mode (the P3 shape)", () => {
     expect(report).toMatchObject({ consumed: 1, depleted: 1, errors: 0, built: 0 });
     expect(scheduler.deps.journal.get("AB-02")!.state).toBe("depleted");
     expect(scheduler.deps.journal.get("AB-02")!.history.map((h) => h.outcome)).toEqual(["consumed"]);
-    for (const slot of ["AB-01", "AB-03", "BC-01", "BC-02", "BC-03"]) expect(scheduler.deps.journal.get(slot)!.state).toBe("live");
+    for (const slot of ["AB-01", "AB-03", "BC-01", "BC-02", "BC-03"]) expect(scheduler.deps.journal.get(slot)!.state).toBe("stored");
     const builds = wallet.builds;
     const again = await scheduler.runTick();
     expect(again).toMatchObject({ depleted: 0, errors: 0, built: 0 });
@@ -299,7 +314,7 @@ describe("failures", () => {
     wallet.snapshotError = new Error("indexer down");
     const report = await scheduler.runTick();
     expect(report).toMatchObject({ built: 0, consumed: 0, expired: 0, errors: 0 });
-    expect(scheduler.deps.journal.slots().every((r) => r.state === "live")).toBe(true);
+    expect(scheduler.deps.journal.slots().every((r) => r.state === "stored")).toBe(true);
   });
 
   test("maxBuildsPerTick defers the rest to the next tick", async () => {
@@ -311,73 +326,171 @@ describe("failures", () => {
   });
 });
 
-describe("kernel mode against the mock kernel", () => {
-  test("posts 6; one live offer per coin; kernel expiry → re-offer the same coin", async () => {
+describe("kernel mode against the mock kernel (API.md dedup: output markers only)", () => {
+  test("posts 6 (submitted → live); kernel expiry → re-offer the same coin; never two live offers per coin", async () => {
     kernel = new MockKernel().start();
     const wallet = fundingWallet();
     const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding"), kernelClient: clientFor(kernel) });
     expect(await scheduler.runTick()).toMatchObject({ built: 6, posted: 6, rejected: 0 });
+    expect(scheduler.deps.journal.slots().every((r) => r.state === "submitted")).toBe(true);
     expect(kernel.offers.size).toBe(6);
-    expect([...kernel.liveByNullifier().values()].every((n) => n === 1)).toBe(true);
     const ab01 = scheduler.deps.journal.get("AB-01")!.current!;
-    // Before our TTL the kernel still says live: nothing happens.
     clock.advance(10 * 60_000);
     expect(await scheduler.runTick()).toMatchObject({ built: 0, posted: 0 });
-    // The kernel expires AB-01 (e.g. its root window elapsed): re-offer at once, same coin.
+    expect(scheduler.deps.journal.slots().every((r) => r.state === "live")).toBe(true);
     kernel.offers.get(ab01.offerId)!.status = "expired";
-    const report = await scheduler.runTick();
-    expect(report).toMatchObject({ expired: 1, built: 1, posted: 1 });
+    expect(await scheduler.runTick()).toMatchObject({ expired: 1, built: 1, posted: 1 });
     const next = scheduler.deps.journal.get("AB-01")!.current!;
     expect(next.coinNonce).toBe(ab01.coinNonce);
     expect(next.offerId).not.toBe(ab01.offerId);
     expect([...kernel.liveByNullifier().values()].every((n) => n === 1)).toBe(true);
   });
 
+  test("C1: a LOST journal with the kernel still holding live offers → the restart ADOPTS them: 0 duplicate live offers per coin", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const first = rig({ wallets: [wallet], slots: testSlots(() => "funding"), kernelClient: clientFor(kernel) });
+    await first.scheduler.runTick();
+    expect(kernel.offers.size).toBe(6);
+    const builds = wallet.builds;
+    const byCoin = new Map(first.scheduler.deps.journal.slots().map((r) => [r.slot, r.current!.coinNonce]));
+    // The journal is lost (down -v, a new STATE_DIR, …): a fresh journal, same wallet and kernel.
+    const second = rig({ wallets: [wallet], slots: testSlots(() => "funding"), kernelClient: clientFor(kernel), clock: first.clock, journalFile: join(dir, "other", "journal.json") });
+    const report = await second.scheduler.runTick();
+    expect(report).toMatchObject({ adopted: 6, built: 0, posted: 0 });
+    expect(wallet.builds).toBe(builds);
+    expect(kernel.offers.size).toBe(6);
+    expect([...kernel.liveByNullifier().values()].every((n) => n === 1)).toBe(true);
+    for (const record of second.scheduler.deps.journal.slots()) {
+      expect(record.state).toBe("live");
+      expect(record.current!.coinNonce).toBe(byCoin.get(record.slot)!); // each slot adopts its own offer (legs match)
+    }
+  });
+
+  test("C1: without the kernel's live list, nothing new is built (cannot prove the coin is free)", async () => {
+    kernel = new MockKernel().start();
+    kernel.listUnavailable = true;
+    const wallet = fundingWallet();
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding"), kernelClient: clientFor(kernel, 1) });
+    const report = await scheduler.runTick();
+    expect(report).toMatchObject({ built: 0, posted: 0 });
+    expect(report.slots.every((r) => r.actions.includes("kernel-live-unknown"))).toBe(true);
+  });
+
+  test("C1: a coin held by a kernel offer with OTHER legs is not built on (waits)", async () => {
+    kernel = new MockKernel().start();
+    const wallet = new FakeWallet("funding", [coin(COLOUR_A, "A1", GIVE)]);
+    const target = coin(COLOUR_A, "A1", GIVE);
+    kernel.offers.set("e".repeat(64), { offerId: "e".repeat(64), blob: "x", nullifiers: [target.nullifier], outputs: [], give: COLOUR_A, giveAmount: GIVE.toString(), want: COLOUR_B, wantAmount: "1", status: "live", postedAt: 0 });
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
+    const report = await scheduler.runTick();
+    expect(report).toMatchObject({ built: 0, adopted: 0, depleted: 0 });
+    expect(report.slots[0]!.actions).toContain("coins-held-by-kernel");
+  });
+
+  test("C7: outbox → kernel switch publishes the stored blobs at once (same bytes, no rebuild)", async () => {
+    const wallet = fundingWallet();
+    const first = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2) });
+    await first.scheduler.runTick();
+    const stored = first.scheduler.deps.journal.slots().map((r) => r.current!.blobSha256);
+    const builds = wallet.builds;
+    kernel = new MockKernel().start();
+    const second = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel), clock: first.clock, journalFile: first.journalFile });
+    const report = await second.scheduler.runTick();
+    expect(report).toMatchObject({ built: 0, posted: 2 });
+    expect(wallet.builds).toBe(builds);
+    expect(second.scheduler.deps.journal.slots().map((r) => r.state)).toEqual(["submitted", "submitted"]);
+    expect(second.scheduler.deps.journal.slots().map((r) => r.current!.blobSha256)).toEqual(stored);
+  });
+
+  test("C7: a live offer the kernel reports not_found is re-posted (same blob), not rebuilt", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
+    await scheduler.runTick();
+    clock.advance(60_000);
+    await scheduler.runTick(); // → live
+    const current = scheduler.deps.journal.get("AB-01")!.current!;
+    kernel.offers.delete(current.offerId); // the kernel lost it
+    const builds = wallet.builds;
+    clock.advance(60_000);
+    const report = await scheduler.runTick();
+    expect(report).toMatchObject({ built: 0, posted: 1 });
+    expect(wallet.builds).toBe(builds);
+    expect(kernel.offers.has(current.offerId)).toBe(true);
+  });
+
+  test("C7: no rebuild while the old offer may still be valid (local TTL passed, root window not)", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const { scheduler, clock } = rig({
+      wallets: [wallet],
+      slots: testSlots(() => "funding").slice(0, 1),
+      kernelClient: clientFor(kernel),
+      config: { offerTtlMs: 5 * 60_000, rootWindowMs: HOUR },
+    });
+    await scheduler.runTick();
+    const first = scheduler.deps.journal.get("AB-01")!.current!;
+    clock.advance(10 * 60_000); // local TTL (5 min) passed; the kernel still says live
+    expect(await scheduler.runTick()).toMatchObject({ built: 0, expired: 0 });
+    kernel.offers.delete(first.offerId); // even not_found inside the root window → re-post, not rebuild
+    expect(await scheduler.runTick()).toMatchObject({ built: 0, expired: 0, posted: 1 });
+    clock.advance(HOUR);
+    kernel.offers.delete(first.offerId);
+    expect(await scheduler.runTick()).toMatchObject({ expired: 1, built: 1 });
+  });
+
+  test("C7: OFFER_ID_MISMATCH halts the slot and KEEPS the coin claimed", async () => {
+    kernel = new MockKernel().start();
+    kernel.script.push({ status: 200, body: { success: true, offerId: "f".repeat(64) } });
+    const wallet = fundingWallet();
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
+    await scheduler.runTick();
+    const record = scheduler.deps.journal.get("AB-01")!;
+    expect(record.state).toBe("halted");
+    expect(record.lastError?.code).toBe("OFFER_ID_MISMATCH");
+    expect(scheduler.deps.journal.claimedNonces().has(record.current!.coinNonce)).toBe(true);
+    clock.advance(2 * HOUR);
+    expect(await scheduler.runTick()).toMatchObject({ built: 0, posted: 0 });
+  });
+
   test("crash between build and ack: the restart re-posts the SAME blob (no second build)", async () => {
     kernel = new MockKernel().start();
     const wallet = fundingWallet();
     const slots = testSlots(() => "funding").slice(0, 2);
-    // Process 1: the kernel is down for every post → slots stay `posting`.
     kernel.script.push({ status: 503, body: "down" }, { status: 503, body: "down" });
     const first = rig({ wallets: [wallet], slots, kernelClient: clientFor(kernel, 1) });
-    const report1 = await first.scheduler.runTick();
-    expect(report1).toMatchObject({ built: 2, posted: 0 });
-    expect(first.scheduler.deps.journal.slots().map((r) => r.state)).toEqual(["posting", "posting"]);
+    expect(await first.scheduler.runTick()).toMatchObject({ built: 2, posted: 0 });
+    expect(first.scheduler.deps.journal.slots().map((r) => r.state)).toEqual(["stored", "stored"]);
     const blobs = new Map(first.scheduler.deps.journal.slots().map((r) => [r.slot, r.current!.blobSha256]));
     const builds = wallet.builds;
-    // Process 2 (restart): healthy kernel. Reconcile finds `not_found` and re-posts.
     const second = rig({ wallets: [wallet], slots, kernelClient: clientFor(kernel), clock: first.clock, journalFile: first.journalFile });
-    const report2 = await second.scheduler.runTick();
-    expect(report2).toMatchObject({ built: 0, posted: 2 });
+    expect(await second.scheduler.runTick()).toMatchObject({ built: 0, posted: 2 });
     expect(wallet.builds).toBe(builds);
     for (const record of second.scheduler.deps.journal.slots()) {
-      expect(record.state).toBe("live");
+      expect(record.state).toBe("submitted");
       expect(record.current!.blobSha256).toBe(blobs.get(record.slot)!);
     }
     expect(kernel.offers.size).toBe(2);
-    expect([...kernel.liveByNullifier().values()].every((n) => n === 1)).toBe(true);
   });
 
-  test("lost ack (kernel stored it, answered 5xx): the retry is a DUPLICATE_OFFER = live", async () => {
+  test("lost ack (kernel stored it, answered 5xx): next tick sees it live, no re-post", async () => {
     kernel = new MockKernel().start();
     const wallet = fundingWallet();
-    const slots = testSlots(() => "funding").slice(0, 1);
     const client = clientFor(kernel, 1);
-    const { scheduler } = rig({ wallets: [wallet], slots, kernelClient: client });
-    // Pretend the first POST reached the kernel but the answer was lost.
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: client });
     const originalPost = client.postOffer.bind(client);
     let first = true;
     client.postOffer = async (blob: string) => {
       if (first) {
         first = false;
-        await originalPost(blob); // stored by the kernel
+        await originalPost(blob);
         return { kind: "unavailable", status: 502, error: "502 bad gateway", attempts: 1 };
       }
       return await originalPost(blob);
     };
     expect(await scheduler.runTick()).toMatchObject({ built: 1, posted: 0 });
-    expect(scheduler.deps.journal.get("AB-01")!.state).toBe("posting");
-    // Next tick: status says live (the kernel has it) → live without a re-post.
+    expect(scheduler.deps.journal.get("AB-01")!.state).toBe("stored");
     expect(await scheduler.runTick()).toMatchObject({ built: 0 });
     expect(scheduler.deps.journal.get("AB-01")!.state).toBe("live");
     expect(kernel.offers.size).toBe(1);
@@ -385,25 +498,19 @@ describe("kernel mode against the mock kernel", () => {
 
   test("409 conflict: rejected with its code, never re-sent; rebuilt only after the backoff", async () => {
     kernel = new MockKernel().start();
+    kernel.script.push({ status: 409, body: { error: "DUPLICATE_MARKERS" } }, { status: 409, body: { error: "DUPLICATE_MARKERS" } });
     const wallet = fundingWallet();
-    const slots = testSlots(() => "funding").slice(0, 1);
-    const { scheduler, clock } = rig({ wallets: [wallet], slots, kernelClient: clientFor(kernel) });
-    // Someone else's live offer already spends the coin AB-01 will pin.
-    const target = [coin(COLOUR_A, "A1", GIVE), coin(COLOUR_A, "A2", GIVE), coin(COLOUR_A, "A3", GIVE)].sort((a, b) => a.nonce.localeCompare(b.nonce))[0]!;
-    kernel.offers.set("f".repeat(64), { offerId: "f".repeat(64), blob: "x", nullifiers: [target.nullifier], status: "live", postedAt: 0 });
-    const report = await scheduler.runTick();
-    expect(report).toMatchObject({ built: 1, rejected: 1, posted: 0 });
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
+    expect(await scheduler.runTick()).toMatchObject({ built: 1, rejected: 1, posted: 0 });
     let record = scheduler.deps.journal.get("AB-01")!;
     expect(record.state).toBe("rejected");
     expect(record.lastError?.code).toBe("DUPLICATE_MARKERS");
-    expect(record.history[0]!.code).toBe("DUPLICATE_MARKERS");
     expect(kernel.posts).toHaveLength(1);
     clock.advance(59_000);
     expect(await scheduler.runTick()).toMatchObject({ built: 0 });
     expect(kernel.posts).toHaveLength(1);
     clock.advance(2_000);
     expect(await scheduler.runTick()).toMatchObject({ built: 1, rejected: 1 });
-    expect(kernel.posts).toHaveLength(2);
     expect(new Set(kernel.posts).size).toBe(2); // a NEW blob, not the refused one
     record = scheduler.deps.journal.get("AB-01")!;
     expect(record.consecutiveFailures).toBe(2);
@@ -412,12 +519,10 @@ describe("kernel mode against the mock kernel", () => {
 
   test("422 malformed is journaled and not retried blindly; NULLIFIER_SPENT → consumed", async () => {
     kernel = new MockKernel().start();
-    const wallet = fundingWallet();
-    const slots = testSlots(() => "funding").slice(0, 2);
     kernel.script.push({ status: 422, body: { error: "MALFORMED" } }, { status: 400, body: { error: "NULLIFIER_SPENT" } });
-    const { scheduler } = rig({ wallets: [wallet], slots, kernelClient: clientFor(kernel) });
-    const report = await scheduler.runTick();
-    expect(report).toMatchObject({ built: 2, rejected: 1, consumed: 1 });
+    const wallet = fundingWallet();
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel) });
+    expect(await scheduler.runTick()).toMatchObject({ built: 2, rejected: 1, consumed: 1 });
     expect(scheduler.deps.journal.get("AB-01")!.lastError?.code).toBe("MALFORMED");
     expect(scheduler.deps.journal.get("AB-02")!.state).toBe("consumed");
     expect(kernel.posts).toHaveLength(2);
@@ -425,12 +530,90 @@ describe("kernel mode against the mock kernel", () => {
 
   test("5xx then accept: retried with the same blob inside one post", async () => {
     kernel = new MockKernel().start();
-    const wallet = fundingWallet();
     kernel.script.push({ status: 500, body: "boom" }, { status: 502, body: "bad" });
+    const wallet = fundingWallet();
     const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
     expect(await scheduler.runTick()).toMatchObject({ built: 1, posted: 1 });
     expect(kernel.posts).toHaveLength(3);
     expect(new Set(kernel.posts).size).toBe(1);
+  });
+});
+
+describe("audit fixes: persistence, timeouts, version guard", () => {
+  test("C3: a failed journal write leaves no memory-only claim; the recipe is released; recovery re-offers without a restart", async () => {
+    const wallet = fundingWallet();
+    let failWrites = false;
+    const write = (file: string, contents: string) => {
+      if (failWrites) throw new Error("ENOSPC: no space left on device");
+      writeAtomic(file, contents);
+    };
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), write });
+    failWrites = true;
+    const report = await scheduler.runTick();
+    expect(report.built).toBe(1);
+    expect(report.slots[0]!.actions).toContain("persist-failed");
+    expect(report.slots[1]!.actions).toContain("publish-blocked"); // publication stops for the tick
+    expect(scheduler.deps.journal.get("AB-01")!.state).toBe("idle"); // memory unchanged
+    expect(scheduler.deps.journal.claimedNonces().size).toBe(0);
+    expect(wallet.releases).toBe(1);
+    failWrites = false;
+    const after = await scheduler.runTick();
+    expect(after).toMatchObject({ built: 2, errors: 0 });
+    expect(scheduler.deps.journal.slots().map((r) => r.state)).toEqual(["stored", "stored"]);
+  });
+
+  test("C6: a hung build times out, the slot errors, and the process is asked to exit", async () => {
+    const wallet = fundingWallet();
+    wallet.build = () => new Promise(() => undefined); // proving never returns
+    const fatal: string[] = [];
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), config: { buildTimeoutMs: 30 }, onFatal: (r) => fatal.push(r) });
+    const report = await scheduler.runTick();
+    expect(scheduler.deps.journal.get("AB-01")!.lastError?.code).toBe("BUILD_TIMEOUT");
+    expect(fatal).toHaveLength(1);
+    expect(scheduler.stopping).toBe(true);
+    expect(report.slots).toHaveLength(1); // stops after the current slot
+  });
+
+  test("C12: a node-version mismatch halts all building and posting, and fails /health", async () => {
+    const wallet = fundingWallet();
+    let version: string | null = "node version 2.0.1 != pinned 2.0.0-d9729c13";
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), versionGuard: async () => version, config: { versionCheckEveryTicks: 1 } });
+    const report = await scheduler.runTick();
+    expect(report).toMatchObject({ built: 0, halted: version });
+    const source = {
+      journal: scheduler.deps.journal,
+      startedAt: clock.now(),
+      delivery: "outbox" as const,
+      mode: "single-wallet-pinned",
+      lastTickEndedAt: () => scheduler.lastProgressAt,
+      haltReason: () => scheduler.haltReason,
+      inventory: () => undefined,
+      now: () => clock.now(),
+    };
+    expect(isHealthy(source, 600_000)).toBe(false);
+    version = null;
+    expect(await scheduler.runTick()).toMatchObject({ built: 2 });
+    expect(isHealthy(source, 600_000)).toBe(true);
+  });
+
+  test("C6: /health fails when every slot is in error", async () => {
+    const wallet = fundingWallet();
+    wallet.build = async () => {
+      throw new Error("proof server down");
+    };
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2) });
+    await scheduler.runTick();
+    const source = {
+      journal: scheduler.deps.journal,
+      startedAt: clock.now(),
+      delivery: "outbox" as const,
+      mode: "single-wallet-pinned",
+      lastTickEndedAt: () => scheduler.lastProgressAt,
+      inventory: () => undefined,
+      now: () => clock.now(),
+    };
+    expect(scheduler.deps.journal.slots().every((r) => r.state === "error")).toBe(true);
+    expect(isHealthy(source, 600_000)).toBe(false);
   });
 });
 
@@ -450,7 +633,7 @@ describe("status", () => {
     };
     const rows = statusRows(source);
     expect(rows).toHaveLength(6);
-    expect(rows[0]).toMatchObject({ slot: "AB-01", ladder: "AB", price: "0.800", walletId: "funding", state: "live" });
+    expect(rows[0]).toMatchObject({ slot: "AB-01", ladder: "AB", price: "0.800", walletId: "funding", state: "stored" });
     expect(rows[0]!.offerId).toMatch(/^[0-9a-f]{64}$/);
     expect(isHealthy(source, 180_000)).toBe(true);
     clock.advance(200_000);
@@ -463,7 +646,7 @@ describe("status", () => {
       expect(await health.text()).toBe("ok");
       const status = (await (await fetch(`http://127.0.0.1:${server.port}/status`)).json()) as { slots: unknown[]; states: Record<string, number> };
       expect(status.slots).toHaveLength(6);
-      expect(status.states["live"]).toBe(6);
+      expect(status.states["stored"]).toBe(6);
       const text = JSON.stringify(status);
       expect(text).not.toMatch(/mnemonic|secret|seed/iu);
     } finally {

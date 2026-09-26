@@ -301,3 +301,23 @@ export const resolveColours = (
   }
   return out;
 };
+
+/** The native (NIGHT) token type: never a valid ladder leg. */
+export const NATIVE_COLOUR = "0".repeat(64);
+
+/**
+ * Audit C11: every ladder's give and want colours must be distinct and non-native, and two
+ * different token symbols must not resolve to the same colour. Checked before any wallet opens.
+ */
+export const validateColours = (file: LadderFile, colours: Readonly<Record<string, string>>): void => {
+  const bySymbol = new Map<string, string>();
+  for (const [symbol, colour] of Object.entries(colours)) {
+    if (colour === NATIVE_COLOUR) throw new LadderConfigError(`token ${symbol} resolves to the native token colour`);
+    const other = bySymbol.get(colour);
+    if (other !== undefined) throw new LadderConfigError(`tokens ${other} and ${symbol} resolve to the same colour`);
+    bySymbol.set(colour, symbol);
+  }
+  for (const ladder of file.ladders) {
+    if (colours[ladder.give] === colours[ladder.want]) throw new LadderConfigError(`ladder ${ladder.id}: give and want colours are equal`);
+  }
+};

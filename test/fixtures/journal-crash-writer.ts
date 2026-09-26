@@ -13,7 +13,7 @@ for (let n = 0; ; n++) {
   for (const slot of ["AB-01", "AB-02", "AB-03"]) {
     const nonce = (n % 16).toString(16).repeat(64);
     const record = journal.get(slot)!;
-    if (record.state === "posting" || record.state === "live") {
+    if (record.state === "stored" || record.state === "live") {
       journal.endOffer(slot, "expired");
       continue;
     }
