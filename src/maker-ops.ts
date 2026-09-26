@@ -11,8 +11,6 @@
  *
  * @module
  */
-import { randomBytes } from "node:crypto";
-
 import { submitCallTx } from "@midnight-ntwrk/midnight-js-contracts";
 import type { FinalizedTxData } from "@midnight-ntwrk/midnight-js-types";
 import * as ledger from "@midnightntwrk/ledger-v9";
@@ -20,6 +18,7 @@ import * as ledger from "@midnightntwrk/ledger-v9";
 import type { MakerOps, MakerStatus } from "./makers.ts";
 import type { WalletNetwork } from "./network.ts";
 import { compiledContractFor, tokenProviders } from "./providers.ts";
+import { withTimeout } from "./scheduler.ts";
 import { bytesOfHex, hexOf, type TokenId } from "./tokens.ts";
 import { WalletSession } from "./wallet-session.ts";
 
@@ -77,7 +76,11 @@ export const openMakerOps = async (options: OpenMakerOptions): Promise<MakerOps>
       const txId = await session.facade.submitTransaction(await session.facade.finalizeRecipe(recipe));
       return { txId: String(txId) };
     },
-    async mintGive(amount: bigint) {
+    async holdsCoin(nonce: string) {
+      const state = await session.caughtUp();
+      return WalletSession.ownedNonces(state).has(nonce.toLowerCase());
+    },
+    async mintGive(amount: bigint, nonceHex: string) {
       const providers = tokenProviders(options.giveToken, options.network, session as never, options.log);
       const compiledContract = await compiledContractFor(options.giveToken);
       const recipient = {
@@ -85,13 +88,14 @@ export const openMakerOps = async (options: OpenMakerOptions): Promise<MakerOps>
         left: { bytes: bytesOfHex(session.identity.coinPublicKey) },
         right: { bytes: new Uint8Array(32) },
       };
-      const nonce = new Uint8Array(randomBytes(32));
-      const result = (await submitCallTx(providers as never, {
+      const nonce = bytesOfHex(nonceHex);
+      if (nonce.length !== 32) throw new Error("mint nonce must be 32 bytes");
+      const result = (await withTimeout(submitCallTx(providers as never, {
         compiledContract,
         contractAddress: options.contractAddress,
         circuitId: "mint",
         args: [recipient, amount, nonce],
-      } as never)) as { public: FinalizedTxData; private: { result: { nonce: Uint8Array; color: Uint8Array; value: bigint } } };
+      } as never), 15 * 60_000, "inventory mint")) as { public: FinalizedTxData; private: { result: { nonce: Uint8Array; color: Uint8Array; value: bigint } } };
       const coin = result.private.result;
       if (hexOf(coin.color) !== options.giveColour) throw new Error(`minted colour ${hexOf(coin.color)} != ${options.giveColour}`);
       return {

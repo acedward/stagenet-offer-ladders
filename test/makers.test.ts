@@ -2,7 +2,7 @@
 // (fakes; no network).
 import { describe, expect, test } from "bun:test";
 
-import { type MakerOps, type MakerRef, type MakerStatus, mintAll, mintDecision, registerDecision, registerDustAll } from "../src/makers.ts";
+import { type MakerOps, type MakerRef, type MakerStatus, type MintRecord, mintAll, mintDecision, registerDecision, registerDustAll } from "../src/makers.ts";
 
 const TARGET = 1_000_000_000n; // 10 offers × 100 tokens
 const MIN_DUST = 10n ** 15n; // 1 DUST
@@ -11,8 +11,11 @@ class FakeMaker implements MakerOps {
   status_: MakerStatus;
   registers = 0;
   mints: bigint[] = [];
+  coins = new Set<string>();
   closed = 0;
   failMint = false;
+  /** Submit succeeds (the coin exists) but the process dies before the answer. */
+  crashAfterSubmit = false;
   constructor(status: MakerStatus) {
     this.status_ = status;
   }
@@ -24,11 +27,16 @@ class FakeMaker implements MakerOps {
     this.status_ = { ...this.status_, nightUtxos: this.status_.nightUtxos.map((u) => ({ ...u, registered: true })) };
     return { txId: `tx-${this.registers}` };
   }
-  async mintGive(amount: bigint) {
+  async mintGive(amount: bigint, nonce: string) {
     if (this.failMint) throw new Error("proof server down");
     this.mints.push(amount);
+    this.coins.add(nonce);
     this.status_ = { ...this.status_, giveBalance: this.status_.giveBalance + amount };
-    return { txHash: "h", blockHeight: 1, status: "SucceedEntirely", coinNonce: "n" };
+    if (this.crashAfterSubmit) throw new Error("process killed after submit");
+    return { txHash: "h", blockHeight: 1, status: "SucceedEntirely", coinNonce: nonce };
+  }
+  async holdsCoin(nonce: string): Promise<boolean> {
+    return this.coins.has(nonce);
   }
   async close(): Promise<void> {
     this.closed += 1;
@@ -67,7 +75,7 @@ describe("register-dust loop", () => {
       open += 1;
       maxOpen = Math.max(maxOpen, open);
       const fake = fakes.get(m.slot)!;
-      return { ...fake, status: () => fake.status(), registerDust: () => fake.registerDust(), mintGive: (a) => fake.mintGive(a), close: async () => { open -= 1; await fake.close(); } };
+      return { status: () => fake.status(), registerDust: () => fake.registerDust(), mintGive: (a, n) => fake.mintGive(a, n), holdsCoin: (n) => fake.holdsCoin(n), close: async () => { open -= 1; await fake.close(); } };
     };
     const sleeps: number[] = [];
     const first = await registerDustAll(refs(["AB-01", "AB-02", "BC-01"]), opener, { staggerMs: 5_000, sleep: async (ms) => { sleeps.push(ms); } });
@@ -94,42 +102,71 @@ describe("register-dust loop", () => {
 });
 
 describe("mint loop", () => {
-  test("mints one inventory coin per eligible maker; skips holders, makers without DUST and recorded ones; re-run is a no-op", async () => {
+  const recorder = () => {
+    const records: Record<string, MintRecord> = {};
+    const log: string[] = [];
+    return {
+      records,
+      log,
+      onRecord: (slot: string, record: MintRecord) => {
+        records[slot] = record;
+        log.push(`${slot}:${record.status}`);
+      },
+    };
+  };
+
+  test("mints one inventory coin per eligible maker (pending recorded BEFORE submit); skips holders, no-DUST and minted makers; re-run is a no-op", async () => {
     const fakes = new Map<string, FakeMaker>([
       ["AB-01", new FakeMaker(status({ dust: MIN_DUST }))],
       ["AB-02", new FakeMaker(status({ dust: MIN_DUST, giveBalance: TARGET }))],
       ["AB-03", new FakeMaker(status({ dust: 0n }))],
       ["AB-04", new FakeMaker(status({ dust: MIN_DUST }))],
     ]);
-    const recorded = new Set<string>(["AB-04"]);
-    const onMinted: string[] = [];
-    const run = () =>
-      mintAll(refs(["AB-01", "AB-02", "AB-03", "AB-04"]), async (m) => fakes.get(m.slot)!, TARGET, MIN_DUST, {
-        minted: recorded,
-        onMinted: (slot) => {
-          onMinted.push(slot);
-          recorded.add(slot);
-        },
-      });
+    const rec = recorder();
+    rec.records["AB-04"] = { status: "minted", nonce: "a".repeat(64), target: TARGET.toString(), at: "x" };
+    const run = () => mintAll(refs(["AB-01", "AB-02", "AB-03", "AB-04"]), async (m) => fakes.get(m.slot)!, TARGET, MIN_DUST, { records: rec.records, onRecord: rec.onRecord });
     const first = await run();
     expect(first.map((r) => r.action)).toEqual(["minted", "skip-already-holds", "skip-no-dust", "skip-already-minted"]);
     expect(fakes.get("AB-01")!.mints).toEqual([TARGET]);
-    expect(onMinted).toEqual(["AB-01"]);
+    expect(rec.log).toEqual(["AB-01:pending", "AB-01:minted"]);
     const second = await run();
     expect(second.map((r) => r.action)).toEqual(["skip-already-minted", "skip-already-holds", "skip-no-dust", "skip-already-minted"]);
     expect(fakes.get("AB-01")!.mints).toEqual([TARGET]);
   });
 
-  test("a failed mint is reported, not recorded, and the next maker still runs", async () => {
+  test("C8: crash after a successful submit → the re-run reconciles by coin nonce and does NOT mint again", async () => {
+    const maker = new FakeMaker(status({ dust: MIN_DUST }));
+    maker.crashAfterSubmit = true;
+    const rec = recorder();
+    const first = await mintAll(refs(["AB-01"]), async () => maker, TARGET, MIN_DUST, { records: rec.records, onRecord: rec.onRecord });
+    expect(first[0]!.action).toBe("error");
+    expect(rec.records["AB-01"]!.status).toBe("pending");
+    maker.crashAfterSubmit = false;
+    // Even after a fill drops the balance below the target, the pending record blocks a re-mint.
+    maker.status_ = { ...maker.status_, giveBalance: 0n };
+    const second = await mintAll(refs(["AB-01"]), async () => maker, TARGET, MIN_DUST, { records: rec.records, onRecord: rec.onRecord });
+    expect(second[0]!.action).toBe("reconciled-minted");
+    expect(rec.records["AB-01"]!.status).toBe("minted");
+    expect(maker.mints).toEqual([TARGET]);
+  });
+
+  test("C8: a pending mint whose coin never appeared is left unresolved: no re-mint", async () => {
+    const maker = new FakeMaker(status({ dust: MIN_DUST }));
+    const rec = recorder();
+    rec.records["AB-01"] = { status: "pending", nonce: "b".repeat(64), target: TARGET.toString(), at: "x" };
+    const result = await mintAll(refs(["AB-01"]), async () => maker, TARGET, MIN_DUST, { records: rec.records, onRecord: rec.onRecord });
+    expect(result[0]!.action).toBe("skip-pending-unresolved");
+    expect(maker.mints).toEqual([]);
+  });
+
+  test("a failed mint is reported, not recorded as minted, and the next maker still runs", async () => {
     const failing = new FakeMaker(status({ dust: MIN_DUST }));
     failing.failMint = true;
     const ok = new FakeMaker(status({ dust: MIN_DUST }));
-    const recorded = new Set<string>();
-    const results = await mintAll(refs(["AB-01", "AB-02"]), async (m) => (m.slot === "AB-01" ? failing : ok), TARGET, MIN_DUST, {
-      minted: recorded,
-      onMinted: (slot) => recorded.add(slot),
-    });
+    const rec = recorder();
+    const results = await mintAll(refs(["AB-01", "AB-02"]), async (m) => (m.slot === "AB-01" ? failing : ok), TARGET, MIN_DUST, { records: rec.records, onRecord: rec.onRecord });
     expect(results.map((r) => r.action)).toEqual(["error", "minted"]);
-    expect([...recorded]).toEqual(["AB-02"]);
+    expect(rec.records["AB-01"]!.status).toBe("pending");
+    expect(rec.records["AB-02"]!.status).toBe("minted");
   });
 });

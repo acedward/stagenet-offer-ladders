@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 /**
  * Maker provisioning (plan P4): register each maker's NIGHT for DUST generation, then
  * self-mint its give token as ONE inventory coin.
@@ -37,8 +39,14 @@ export interface MakerOps {
   status(): Promise<MakerStatus>;
   /** Register the unregistered NIGHT UTxOs; returns the submitted transaction id. */
   registerDust(): Promise<{ txId: string }>;
-  /** Mint `amount` base units of the give token to self as one coin. */
-  mintGive(amount: bigint): Promise<{ txHash: string; blockHeight: number; status: string; coinNonce: string }>;
+  /**
+   * Mint `amount` base units of the give token to self as one coin, with the call nonce
+   * `nonce` (64 hex). The minted coin's nonce equals the call nonce (00052 P4), which is
+   * what makes a crashed mint reconcilable (audit C8).
+   */
+  mintGive(amount: bigint, nonce: string): Promise<{ txHash: string; blockHeight: number; status: string; coinNonce: string }>;
+  /** Does the wallet own a coin with this nonce (spendable or pending)? */
+  holdsCoin(nonce: string): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -121,6 +129,19 @@ export const registerDustAll = (
     options,
   );
 
+/** A maker's inventory-mint record (public data), persisted BEFORE the mint is submitted. */
+export interface MintRecord {
+  readonly status: "pending" | "minted";
+  /** Call nonce = minted coin nonce, 64 hex. */
+  readonly nonce: string;
+  readonly target: string;
+  readonly token?: string;
+  readonly at: string;
+  readonly txHash?: string;
+  readonly blockHeight?: number;
+  readonly reconciled?: boolean;
+}
+
 export const mintAll = (
   makers: readonly MakerRef[],
   open: (maker: MakerRef) => Promise<MakerOps>,
@@ -130,24 +151,51 @@ export const mintAll = (
     staggerMs?: number;
     sleep?: (ms: number) => Promise<void>;
     log?: (line: string) => void;
-    /** Slots with a recorded successful inventory mint. */
-    minted?: ReadonlySet<string>;
-    /** Called after each successful mint (to record it before the next maker). */
-    onMinted?: (slot: string, detail: Record<string, unknown>) => void;
+    /** Current records by slot (pending or minted). */
+    records?: Readonly<Record<string, MintRecord>>;
+    /** Persist a record durably; called with `pending` BEFORE submitting (audit C8). */
+    onRecord?: (slot: string, record: MintRecord) => void;
+    /** Fresh call nonce (64 hex). */
+    newNonce?: () => string;
+    now?: () => Date;
   } = {},
-): Promise<MakerResult[]> =>
-  forEachMaker(
+): Promise<MakerResult[]> => {
+  const now = options.now ?? (() => new Date());
+  const newNonce =
+    options.newNonce ??
+    (() => {
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      return Buffer.from(bytes).toString("hex");
+    });
+  return forEachMaker(
     makers,
     open,
     async (maker, ops) => {
-      if (options.minted?.has(maker.slot)) return { slot: maker.slot, action: "skip-already-minted" };
+      const record = options.records?.[maker.slot];
+      if (record?.status === "minted") return { slot: maker.slot, action: "skip-already-minted" };
+      if (record?.status === "pending") {
+        // A mint was submitted but its outcome was never recorded: reconcile by coin nonce,
+        // and NEVER mint again while it is unresolved.
+        if (await ops.holdsCoin(record.nonce)) {
+          options.onRecord?.(maker.slot, { ...record, status: "minted", reconciled: true, at: now().toISOString() });
+          return { slot: maker.slot, action: "reconciled-minted", detail: { nonce: record.nonce } };
+        }
+        return { slot: maker.slot, action: "skip-pending-unresolved", detail: { nonce: record.nonce, since: record.at } };
+      }
       const status = await ops.status();
       const decision = mintDecision(status, target, minDust);
       if (decision !== "mint") return { slot: maker.slot, action: decision, detail: { giveBalance: status.giveBalance, dust: status.dust } };
-      const minted = await ops.mintGive(target);
+      const nonce = newNonce();
+      const pending: MintRecord = { status: "pending", nonce, target: target.toString(), at: now().toISOString() };
+      options.onRecord?.(maker.slot, pending);
+      const minted = await ops.mintGive(target, nonce);
       const detail = { ...minted, amount: target };
-      if (minted.status === "SucceedEntirely") options.onMinted?.(maker.slot, detail);
+      if (minted.status === "SucceedEntirely") {
+        options.onRecord?.(maker.slot, { ...pending, status: "minted", txHash: minted.txHash, blockHeight: minted.blockHeight, at: now().toISOString() });
+      }
       return { slot: maker.slot, action: minted.status === "SucceedEntirely" ? "minted" : "mint-failed", detail };
     },
     options,
   );
+};

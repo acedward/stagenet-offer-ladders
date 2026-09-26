@@ -17,13 +17,13 @@ import { buildPublicMakers, checkMakers, type PublicMakersFile, renderPublicMake
 import { readLadderFile } from "./ladder.ts";
 import { fetchLedgerParameters, stagenet } from "./network.ts";
 import { inspectOffer } from "./offer-inspect.ts";
-import { openJournal } from "./journal.ts";
+import { openJournal, writeAtomic } from "./journal.ts";
 import { Outbox } from "./outbox.ts";
 import { createService, fundingLock, loadServiceConfig } from "./service.ts";
 import { takeServiceLock } from "./service-lock.ts";
 import { startWatchdog } from "./watchdog.ts";
 import { openMakerOps } from "./maker-ops.ts";
-import { mintAll, registerDustAll } from "./makers.ts";
+import { type MintRecord, mintAll, registerDustAll } from "./makers.ts";
 import { settleOffer } from "./settle.ts";
 import type { TokenId } from "./tokens.ts";
 import { verifyCurrentOffers } from "./verify.ts";
@@ -525,8 +525,19 @@ const makersMint: Command = async (flags) => {
   if (network.networkId !== makers.networkId) throw new Error(`makers file is for ${makers.networkId}`);
   const inventoryOffers = BigInt(flag(flags, "inventory-offers", process.env["INVENTORY_OFFERS"] ?? "10")!);
   const minDust = BigInt(Math.round(Number(flag(flags, "min-dust", "1")) * 1e6)) * 10n ** 9n; // DUST → SPECK
-  const recordFile = `${process.env["STATE_DIR"]?.trim() || `${process.env["HOME"]}/.stagenet-offer-ladders/state`}/maker-mints.json`;
-  const record: Record<string, unknown> = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, "utf8")) : {};
+  const recordFile = `${stateDirectory()}/maker-mints.json`;
+  const record: Record<string, MintRecord> = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, "utf8")) : {};
+  const persist = (): void => {
+    mkdirSync(dirname(recordFile), { recursive: true });
+    writeAtomic(recordFile, `${JSON.stringify(record, null, 2)}\n`); // durable before the next step (audit C8)
+  };
+  const clear = flag(flags, "clear-pending");
+  if (clear !== undefined) {
+    if (record[clear]?.status !== "pending") throw new Error(`${clear} has no pending mint`);
+    log(`clearing ${clear}'s pending mint (nonce ${record[clear]!.nonce.slice(0, 12)}…): only after checking the chain shows no such coin`);
+    delete record[clear];
+    persist();
+  }
   const { height, parameters } = await fetchLedgerParameters(network);
   log(`ledger parameters from block ${height}; ${selected.length} maker(s); inventory ${inventoryOffers} offers per maker`);
   const results = [];
@@ -552,10 +563,10 @@ const makersMint: Command = async (flags) => {
         {
           staggerMs: Number(flag(flags, "stagger-ms", "5000")),
           log,
-          minted: new Set(Object.keys(record)),
-          onMinted: (slot, detail) => {
-            record[slot] = { ...detail, token: give.symbol, at: new Date().toISOString() };
-            writePublicFile(recordFile, `${JSON.stringify(record, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2)}\n`);
+          records: record,
+          onRecord: (slot, entry) => {
+            record[slot] = { ...entry, token: give.symbol };
+            persist();
           },
         },
       )),
