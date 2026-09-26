@@ -73,7 +73,12 @@ export const openMakerOps = async (options: OpenMakerOptions): Promise<MakerOps>
         session.signData(data),
       );
       if (recipe.type !== "UNPROVEN_TRANSACTION") throw new Error(`unexpected DUST registration recipe ${recipe.type}`);
-      const txId = await session.facade.submitTransaction(await session.facade.finalizeRecipe(recipe));
+      // Audit C6 (verification): proving and submission of the registration have a deadline.
+      const txId = await withTimeout(
+        (async () => session.facade.submitTransaction(await session.facade.finalizeRecipe(recipe)))(),
+        15 * 60_000,
+        "DUST registration",
+      );
       return { txId: String(txId) };
     },
     async holdsCoin(nonce: string) {

@@ -64,7 +64,8 @@ export const settleOffer = async (args: SettleArgs): Promise<SettleResult> => {
   const finalized = await session.facade.finalizeRecipe(signed);
   const settlementNullifiers = collectNullifiers(finalized);
   const submittedAt = new Date().toISOString();
-  const txId = await session.facade.submitTransaction(finalized);
+  // The SDK's submitTransaction already waits for finalisation: bound it too (audit C6).
+  const txId = await withTimeout(session.facade.submitTransaction(finalized), args.inclusionTimeoutMs ?? 10 * 60_000, "settlement submission");
   log(`submitted settlement ${String(txId).slice(0, 16)}…; waiting for the indexer`);
   setNetworkId(network.networkId);
   const indexer = indexerPublicDataProvider({ queryURL: network.indexerHttpUrl, subscriptionURL: network.indexerWsUrl });

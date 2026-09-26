@@ -230,10 +230,36 @@ against a real kernel) has not run yet. Do it in stages:
   kernel mode a fresh journal adopts the kernel's matching live offers instead of posting
   twins, and builds nothing while the kernel's list cannot be read.
 - **A pending mint is never repeated**: `makers:mint` records the call nonce before
-  submitting. If a maker shows `skip-pending-unresolved`, check the chain for that coin, then
-  `makers:mint --clear-pending <slot>`.
+  submitting (`state/maker-mints.json`, version 2; older receipts are migrated). If a maker
+  shows `skip-pending-unresolved` (the command exits non-zero), do NOT clear it just because
+  the wallet lacks the coin: look up the mint transaction on the indexer (the token
+  contract's `mint` call with that nonce). Clear with `makers:mint --clear-pending <slot>`
+  only when no such transaction exists and the pending record is older than the transaction
+  TTL; if it succeeded, the next run records it once the wallet shows the coin.
+- **Proof server**: its image has no shell for a Compose health check. The ladder waits for
+  its `/health` at start and exits on a build timeout; if `BUILD_TIMEOUT` repeats, run
+  `docker compose restart proof-server`.
+- **Fresh journal = explicit acknowledgement.** A journal created from nothing (first
+  install, or after one was lost) builds and adopts nothing, and `/health` fails, until you
+  start once with `FRESH_START_ACK=true`. Before that, make sure no earlier offer of these
+  wallets can still be live or waiting to be indexed: in kernel mode check the kernel's
+  `GET /v1/offers?token=<give colour>` for the makers' coins, or wait out the root window.
+- **Halted slots** (an offer-id or input-nullifier mismatch) keep their coin claimed and fail
+  `/health`; `/status` lists them. After checking the offer in the kernel, stop the service
+  and run `slots:unhalt --slot AB-01` (re-verify, claim kept) or `slots:unhalt --slot AB-01
+  --retire` (you confirmed the old offer is dead; the coin is freed).
+- **Stale locks**: `service.lock` is never taken over by age. A holder on the same host that
+  is provably gone (PID not running, PID reused, or a restarted container) is replaced
+  automatically; a holder on another host is refused until you confirm it is not running
+  and start once with `BREAK_LOCK=<instance id from the error>`.
+- **Root window**: `ROOT_WINDOW_MINUTES` is an upper bound that you set to the network's real
+  Merkle-root window. The kernel expires an offer at the root's last-seen time plus that
+  window; the service rebuilds on a coin only when the kernel says the offer is expired or
+  consumed, or no longer lists it and the bound has passed. An unknown status never frees a
+  coin.
 - **Version guard**: the service halts (and `/health` fails) when the node's
-  `system_version` differs from `EXPECTED_NODE_VERSION` (default `2.0.0-d9729c13`).
+  `system_version` differs from `EXPECTED_NODE_VERSION` (default `2.0.0-d9729c13`), and also
+  while the version cannot be read.
 - **Watchdog**: `ladder:run` exits with code 70 when it makes no progress for
   `WATCHDOG_SECONDS`, and after a build that exceeds `BUILD_TIMEOUT_SECONDS`; Compose's
   `restart: unless-stopped` brings it back.
