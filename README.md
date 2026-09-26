@@ -14,7 +14,51 @@ It holds two pieces of work, each delivered as its own pull request:
    kernel, `+stkA → −stkB` and `+stkB → −stkC`, and re-sends them on a schedule. It uses
    the tokens above.
 
-This commit is the scaffold only: layout, pinned dependencies and the secrets policy.
+## stkA / stkB / stkC on stagenet
+
+Deployed 2026-09-26 (`deployments/stagenet.json`). The colour is the 32-byte raw token type
+that the shielded coins carry.
+
+| Token | Contract address | Colour | Domain | Decimals |
+|---|---|---|---|---|
+| stkA | `e8551694e54075e139a7910c882e5f9e45418db744414a3d5908e2e95c4c1d67` | `065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934` | `stk:stka` | 6 |
+| stkB | `9526b72c34309d2deb426fe5155d601437680f53ca305728a1417b4e8c5eb7e0` | `c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7` | `stk:stkb` | 6 |
+| stkC | `c03b55f7cf508a0c92ff15049fa3c4638e9b585f635a122254332a32556599b8` | `95778c5f7234237d696969032d8dcfe22936c98927e4d46483c56d11d9c9883b` | `stk:stkc` | 6 |
+
+Anyone can mint: `mint(recipient, amount, nonce)`, where `amount` is in base units
+(1 token = 10^6) and `nonce` is 32 bytes, unique per mint. See `contracts/README.md` for the
+contract source and build.
+
+## Tools
+
+All of them run in Docker. The funding mnemonic file is passed by path only.
+
+```sh
+# compile (pinned compactc 0.34.0, SHA-256 checked); --check verifies managed/ is reproducible
+scripts/compile-docker.sh [--check]
+
+# read-only wallet status (public addresses and balances)
+FUNDING_WALLET_FILE_HOST=/path/to/mnemonic-file scripts/stagenet-run.sh scripts/wallet-status.ts
+
+# deploy + publishMetadata (resumable; a re-run with nothing to do needs no wallet)
+FUNDING_WALLET_FILE_HOST=/path/to/mnemonic-file scripts/stagenet-run.sh scripts/deploy-tokens.ts
+
+# mint: one token, or a batch; --to self or a shielded address (mn_shield-addr_stagenet1…)
+FUNDING_WALLET_FILE_HOST=/path/to/mnemonic-file scripts/stagenet-run.sh scripts/mint.ts \
+  --token stkA --amount 100 --count 3 --to self
+FUNDING_WALLET_FILE_HOST=/path/to/mnemonic-file scripts/stagenet-run.sh scripts/mint.ts \
+  --batch stkA:100x3,stkB:1000x1 --to mn_shield-addr_stagenet1... --label my-batch
+
+# secret scan (run before every push); prints PASS or FAIL only
+docker run --rm -v "$PWD":/work -v /path/to/mnemonic-file:/secrets/stagenet:ro \
+  -e FUNDING_WALLET_FILE=/secrets/stagenet -w /work oven/bun:1.3.11 bun scripts/secret-scan.ts /work
+```
+
+`scripts/stagenet-run.sh` starts `midnightntwrk/proof-server:9.0.0-rc.6`, pinned by digest,
+on a random free loopback port ≥ 10000. It runs the script in a container that shares the
+proof server's network, mounts the mnemonic file read-only, and removes both containers
+when the script ends. Each mint is appended to `out/mints.stagenet.jsonl` (git-ignored; it
+holds public data only).
 
 ## Layout
 
