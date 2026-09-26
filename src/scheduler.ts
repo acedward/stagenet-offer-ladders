@@ -535,7 +535,8 @@ export class Scheduler {
       return;
     }
     if (status === "live") {
-      if (record.state !== "live") {
+      // Verify once per offer, including `live` records from before this check existed.
+      if (record.state !== "live" || current.verified !== true) {
         // The kernel's own view of what the offer spends must be exactly our pinned coin
         // (the upstream poster's post-live check; audit C7/B7). Unreadable → stay pending
         // and check again next tick (audit F-B21).
@@ -572,8 +573,10 @@ export class Scheduler {
     // Always the SAME blob: the kernel answers DUPLICATE_OFFER if it already holds it.
     // Stored offers are published at once; a submitted or live offer is re-posted at most
     // once per SUBMIT_CONFIRM_SECONDS (audit F-A20: no re-post every tick).
-    const waitedLongEnough =
-      record.state === "stored" || current.postedAt === undefined || now - Date.parse(current.postedAt) >= cfg.submitConfirmMs;
+    // The cadence counts failed attempts too (audit C7 verification): an unavailable kernel
+    // is not hammered every tick.
+    const lastTry = current.lastPostAttemptAt ?? current.postedAt;
+    const waitedLongEnough = lastTry === undefined || now - Date.parse(lastTry) >= cfg.submitConfirmMs;
     if (!waitedLongEnough) {
       actions.push("awaiting-index");
       return;

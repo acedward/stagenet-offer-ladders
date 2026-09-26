@@ -180,7 +180,9 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
       mode,
       coinPolicy,
       offerTtlMs,
-      expiryGraceMs: num("EXPIRY_GRACE_SECONDS", 5) * 1000,
+      // Margin past the root window: the kernel counts from the root's LAST-SEEN time, a
+      // little after the build (audit C7 verification). Conservative default: 5 min.
+      expiryGraceMs: num("EXPIRY_GRACE_SECONDS", 300) * 1000,
       retryBaseMs: num("RETRY_BASE_SECONDS", 60, 1) * 1000,
       retryMaxMs: num("RETRY_MAX_SECONDS", ttlMinutes * 60, 1) * 1000,
       excludeNonces: new Set(ladders.excludeNonces ?? []),

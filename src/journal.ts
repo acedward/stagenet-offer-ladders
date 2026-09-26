@@ -82,6 +82,10 @@ export interface OfferRef {
   readonly expiresAt: string;
   postedAt?: string;
   postAttempts?: number;
+  /** Last POST attempt, successful or not (re-post cadence; audit C7 verification). */
+  lastPostAttemptAt?: string;
+  /** The kernel's input nullifiers were read and matched when it first listed the offer live. */
+  verified?: boolean;
   outcome?: OfferOutcome;
   endedAt?: string;
   code?: string;
@@ -452,6 +456,7 @@ export class Journal {
       const record = this.#requireIn(data, slot);
       if (!CLAIMING_STATES.includes(record.state) || !record.current) throw new JournalError("BAD_TRANSITION", `slot ${slot}: no outstanding offer`);
       record.current.postAttempts = (record.current.postAttempts ?? 0) + 1;
+      record.current.lastPostAttemptAt = this.#iso();
       if (code !== undefined) record.current.code = code;
       return record;
     });
@@ -465,6 +470,7 @@ export class Journal {
         throw new JournalError("BAD_TRANSITION", `slot ${slot}: cannot be submitted from state ${record.state}`);
       }
       record.current.postedAt = this.#iso();
+      record.current.lastPostAttemptAt = this.#iso();
       record.current.postAttempts = (record.current.postAttempts ?? 0) + 1;
       if (record.state !== "live") {
         record.state = "submitted";
@@ -486,6 +492,7 @@ export class Journal {
       }
       if (!record.current) throw new JournalError("BAD_TRANSITION", `slot ${slot}: no current offer`);
       record.current.postedAt ??= this.#iso();
+      record.current.verified = true;
       record.state = "live";
       record.stateAt = this.#iso();
       record.consecutiveFailures = 0;

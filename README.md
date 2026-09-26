@@ -278,7 +278,10 @@ against a real kernel) has not run yet. Do it in stages:
   process, so a crash re-posts the same offer instead of building a second one. Slot states:
   `stored` (in the outbox) → `submitted` (kernel accepted) → `live` (kernel lists it).
 - An offer is rebuilt only when it is provably dead: the kernel says expired or consumed,
-  or `ROOT_WINDOW_MINUTES` (default 60) has passed since it was built.
+  or the kernel does not list it and `ROOT_WINDOW_MINUTES` (default 60) plus
+  `EXPIRY_GRACE_SECONDS` (default 300, a margin for the root's last-seen time) have passed
+  since it was built. In outbox mode (never published) the same bound applies. An unknown
+  kernel status never frees a coin.
 - `GET /health` returns `ok` (no data) while the scheduler makes progress;
   `GET /status` returns the slot table (no secrets).
 - Kernel refusals (conflict, malformed, not sponsored) are journaled with their code and

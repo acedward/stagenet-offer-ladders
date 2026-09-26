@@ -1,7 +1,7 @@
 // Scheduler with a fake clock, fake wallets (real builder + pin selector) and, in kernel
 // mode, the in-process mock kernel over real HTTP.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -494,6 +494,9 @@ describe("kernel mode against the mock kernel (API.md dedup: output markers only
     const blobs = new Map(first.scheduler.deps.journal.slots().map((r) => [r.slot, r.current!.blobSha256]));
     const builds = wallet.builds;
     const second = rig({ wallets: [wallet], slots, kernelClient: clientFor(kernel), clock: first.clock, journalFile: first.journalFile });
+    const early = await second.scheduler.runTick(); // the failed attempt counts for the re-post cadence
+    expect(early).toMatchObject({ built: 0, posted: 0 });
+    first.clock.advance(5 * 60_000);
     expect(await second.scheduler.runTick()).toMatchObject({ built: 0, posted: 2 });
     expect(wallet.builds).toBe(builds);
     for (const record of second.scheduler.deps.journal.slots()) {
@@ -647,6 +650,50 @@ describe("audit fixes: persistence, timeouts, version guard", () => {
 });
 
 describe("third audit pass", () => {
+  test("C7 verification: a live record from before the input check is verified once, and a wrong read halts it", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const client = clientFor(kernel);
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: client });
+    await scheduler.runTick();
+    clock.advance(60_000);
+    await scheduler.runTick();
+    expect(scheduler.deps.journal.get("AB-01")!.current!.verified).toBe(true);
+    // simulate an older journal: live but never verified
+    const file = scheduler.deps.journal.file;
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    delete data.slots["AB-01"].current.verified;
+    writeFileSync(file, JSON.stringify(data));
+    client.offerNullifiers = async () => ["ee".repeat(32)];
+    const again = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: client, clock, journalFile: file });
+    await again.scheduler.runTick();
+    expect(again.scheduler.deps.journal.get("AB-01")!.state).toBe("halted");
+  });
+
+  test("C1 verification: a transient 429 on the live list is retried within the budget", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    let calls = 0;
+    const client = clientFor(kernel);
+    const real = client.liveOffers.bind(client);
+    // one transient failure is absorbed by the client's own retry: exercise it via the HTTP path
+    const flaky = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: async (req) => {
+        const url = new URL(req.url);
+        if (req.method === "GET" && url.pathname === "/v1/offers" && calls++ === 0) return Response.json({ error: "RATE_LIMITED" }, { status: 429, headers: { "retry-after": "1" } });
+        return fetch(`${kernel!.url}${url.pathname}${url.search}`, { method: req.method, headers: req.headers, body: req.method === "POST" ? await req.text() : undefined });
+      },
+    });
+    const viaFlaky = new KernelClient({ baseUrl: `http://127.0.0.1:${flaky.port}`, sleep: async () => undefined, random: () => 0.5 });
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: viaFlaky });
+    expect(await scheduler.runTick()).toMatchObject({ built: 1, posted: 1 });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    await flaky.stop(true);
+    void real;
+  });
+
   test("F-B25/F-B26: a process that lost service.lock builds and posts nothing and asks to exit", async () => {
     const wallet = fundingWallet();
     const fatal: string[] = [];

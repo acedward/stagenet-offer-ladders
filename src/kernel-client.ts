@@ -311,6 +311,7 @@ export class KernelClient {
    */
   async liveOffers(colours: readonly string[], maxPages = 100): Promise<LiveOfferRow[]> {
     const out: LiveOfferRow[] = [];
+    const nap = this.#budget();
     const bad = (why: string): never => {
       throw new Error(`GET /v1/offers: malformed response (${why}); refusing to treat it as an empty book`);
     };
@@ -319,7 +320,12 @@ export class KernelClient {
       let complete = false;
       for (let page = 0; page < maxPages; page++) {
         const suffix = cursor ? `&after_hash=${cursor}` : "";
-        const answer = await this.#request(`/v1/offers?token=${colour}&direction=GIVING&limit=100${suffix}`, { method: "GET" });
+        // Transient 429/5xx are retried within the shared per-call sleep budget (audit C1 verification).
+        let answer = await this.#request(`/v1/offers?token=${colour}&direction=GIVING&limit=100${suffix}`, { method: "GET" });
+        for (let attempt = 1; (answer.status === 429 || answer.status >= 500) && attempt < this.#attempts; attempt++) {
+          if (!(await nap(this.retryAfterDelay(answer.retryAfterMs, attempt)))) break;
+          answer = await this.#request(`/v1/offers?token=${colour}&direction=GIVING&limit=100${suffix}`, { method: "GET" });
+        }
         if (answer.status !== 200) throw new Error(`GET /v1/offers → ${answer.status}`);
         // Audit F-B15: validate the shape; anything unexpected fails closed.
         const body = answer.body as { offers?: unknown; nextCursor?: unknown } | null;

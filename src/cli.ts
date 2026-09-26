@@ -552,7 +552,7 @@ const makersMint: Command = async (flags) => {
   const clear = flag(flags, "clear-pending");
   if (clear !== undefined) {
     if (record[clear]?.status !== "pending") throw new Error(`${clear} has no pending mint`);
-    log(`clearing ${clear}'s pending mint (nonce ${record[clear]!.nonce.slice(0, 12)}…): only after checking the chain shows no such coin`);
+    log(`clearing ${clear}'s pending mint (nonce ${record[clear]!.nonce.slice(0, 12)}…): only after looking up the mint transaction on the indexer and finding none`);
     delete record[clear];
     persist();
   }
@@ -591,7 +591,7 @@ const makersMint: Command = async (flags) => {
     );
   }
   printResult({ networkId: makers.networkId, results });
-  return results.some((r) => r.action === "error" || r.action === "mint-failed" || r.action === "skip-pending-unresolved") ? 1 : 0;
+  return results.some((r) => ["error", "mint-failed", "skip-pending-unresolved", "skip-no-dust"].includes(r.action)) ? 1 : 0;
 };
 
 /**

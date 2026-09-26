@@ -125,6 +125,16 @@ const appendDurable = (file: string, line: string): void => {
   } finally {
     closeSync(fd);
   }
+  try {
+    const dir = openSync(join(REPOSITORY_ROOT, "out"), "r"); // the directory entry too (a new file)
+    try {
+      fsyncSync(dir);
+    } finally {
+      closeSync(dir);
+    }
+  } catch {
+    /* not supported on every filesystem */
+  }
 };
 const clearedNonces = (): Set<string> =>
   new Set(
