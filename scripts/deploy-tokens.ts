@@ -113,10 +113,8 @@ const reconcile = async (
       record.deployStatus = String(data.status);
       save();
     } else if (record.deployStatus === "built") {
-      // Built but never submitted: nothing is on chain; build a fresh deployment.
-      log("reconcile.deploy.unsubmitted", { token: record.id, address: record.address });
-      record.deployStatus = "abandoned-before-submission";
-      save();
+      // Not visible (yet): it may still have been broadcast. Recorded, not replaced (audit C9).
+      log("reconcile.deploy.not-visible", { token: record.id, address: record.address });
     }
   }
   if (deployed(record) && !published(record)) {
@@ -203,6 +201,15 @@ async function main(): Promise<void> {
         const compiledContract = await compiledContractFor(id);
 
         if (!deployed(record)) {
+          // Audit C9: a recorded address whose deployment is not confirmed may still land
+          // (a crash during submission can leave "built" after a broadcast); never replace it
+          // silently.
+          if (record.address && !process.argv.includes("--force")) {
+            throw new Error(
+              `${id}: deployment ${record.address} is recorded as ${record.deployStatus ?? "unknown"} and not confirmed; ` +
+                "check the chain, then re-run with --force to build a new deployment",
+            );
+          }
           const signingKey = sampleSigningKey();
           const verifyingKey = signatureVerifyingKey(signingKey);
           const keyDir = join(stateDir(), "maintenance");
@@ -217,7 +224,8 @@ async function main(): Promise<void> {
           const address = unsubmitted.public.contractAddress;
           renameSync(pendingKeyFile, join(keyDir, `${id}-${address}.signing-key.json`));
           record.address = address;
-          record.maintenanceVerifyingKey = String(verifyingKey);
+          // Audit C10: the key is a tagged object ({ tag, value }); String() gave "[object Object]".
+          record.maintenanceVerifyingKey = `${verifyingKey.tag}:${verifyingKey.value}`;
           record.deployStatus = "built";
           record.deploy = undefined;
           record.publishMetadata = undefined;

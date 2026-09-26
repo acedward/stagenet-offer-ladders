@@ -22,7 +22,7 @@
       "artefactManifestSha256": "9f7ff982ab877e73eea8ce24e97907859d3c87dfbea43b12952acef02d7f7876",
       "updatedAt": "2026-09-26T15:03:15.070Z",
       "address": "e8551694e54075e139a7910c882e5f9e45418db744414a3d5908e2e95c4c1d67",
-      "maintenanceVerifyingKey": "[object Object]",
+      "maintenanceVerifyingKey": "schnorr:080c4214562421c45f85bb021ba9c2727add3af323e0dc7eea4935f374dad857",
       "deployStatus": "SucceedEntirely",
       "deploy": {
         "txId": "006a8475353a93942838399f096f2eaed7858297abbd026678f9afc77ce178976e",
@@ -75,7 +75,7 @@
       "artefactManifestSha256": "8102f90a83cfd45e11fdb6c4ec2775a4ed93ca0b6c43c2ef66b901297a7cf654",
       "updatedAt": "2026-09-26T15:03:51.149Z",
       "address": "9526b72c34309d2deb426fe5155d601437680f53ca305728a1417b4e8c5eb7e0",
-      "maintenanceVerifyingKey": "[object Object]",
+      "maintenanceVerifyingKey": "schnorr:e50120d648bf488df1f60b9caecb6e5fb26a29ea4d114eacbf1e6996e464329d",
       "deployStatus": "SucceedEntirely",
       "deploy": {
         "txId": "00de44a6edffca14b7464399acd255185b2e0926c98c6a4e573756ca931945a8f2",
@@ -128,7 +128,7 @@
       "artefactManifestSha256": "d91b77dafe7b8ec41be46f1dcae0fc2189328ffb5d99196567db30993c42f532",
       "updatedAt": "2026-09-26T15:04:26.236Z",
       "address": "c03b55f7cf508a0c92ff15049fa3c4638e9b585f635a122254332a32556599b8",
-      "maintenanceVerifyingKey": "[object Object]",
+      "maintenanceVerifyingKey": "schnorr:6c04fd8b19e8619c9d006684aee78f73f929b5241d153747ec181c32e8123275",
       "deployStatus": "SucceedEntirely",
       "deploy": {
         "txId": "00249d252b9925e8120b17c80137e94cbabc211146365be7c09b0a20a3d19b3c6a",
