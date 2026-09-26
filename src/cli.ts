@@ -15,7 +15,7 @@ import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
 
 import { buildPublicMakers, checkMakers, type PublicMakersFile, renderPublicMakersMarkdown } from "./addresses.ts";
 import { readLadderFile } from "./ladder.ts";
-import { fetchLedgerParameters, stagenet } from "./network.ts";
+import { fetchLedgerParameters, fetchNodeVersion, stagenet } from "./network.ts";
 import { inspectOffer } from "./offer-inspect.ts";
 import { openJournal, writeAtomic } from "./journal.ts";
 import { Outbox } from "./outbox.ts";
@@ -484,6 +484,14 @@ const giveTokenOf = (ladder: string, ladderFile?: string) => {
   return { symbol: def.give as TokenId, colour: slot.giveColour, contractAddress: record.address, giveAmount: BigInt(slot.giveAmount), network: config.network };
 };
 
+/** Audit C12: refuse to touch makers when the node is not the pinned version. */
+const requirePinnedNode = async (): Promise<void> => {
+  const expected = process.env["EXPECTED_NODE_VERSION"] ?? "2.0.0-d9729c13";
+  if (expected === "") return;
+  const actual = await fetchNodeVersion(stagenet());
+  if (actual !== expected) throw new Error(`node version ${actual} != pinned ${expected}; the SDK set must move with it`);
+};
+
 /** makers:register-dust [--slots all|AB-01,…] [--stagger-ms 5000]: register makers' NIGHT for DUST (one at a time). */
 const makersRegisterDust: Command = async (flags) => {
   const { makers, selected } = selectMakers(flags);
@@ -586,8 +594,16 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "wallets:addresses": walletsAddresses,
   "wallets:check": walletsCheck,
   "makers:status": (flags) => withServiceLock("makers:status", () => makersStatus(flags)),
-  "makers:register-dust": (flags) => withServiceLock("makers:register-dust", () => makersRegisterDust(flags)),
-  "makers:mint": (flags) => withServiceLock("makers:mint", () => makersMint(flags)),
+  "makers:register-dust": (flags) =>
+    withServiceLock("makers:register-dust", async () => {
+      await requirePinnedNode();
+      return await makersRegisterDust(flags);
+    }),
+  "makers:mint": (flags) =>
+    withServiceLock("makers:mint", async () => {
+      await requirePinnedNode();
+      return await makersMint(flags);
+    }),
   "ladder:once": ladderOnce,
   "ladder:run": ladderRun,
   "offers:inspect": offersInspect,

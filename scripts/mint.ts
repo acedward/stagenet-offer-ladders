@@ -103,6 +103,24 @@ interface MintLine {
   tx: { status: string };
 }
 
+/** Audit C8: a line per mint written BEFORE it is submitted (call nonce = minted coin nonce). */
+const PENDING_FILE = join(REPOSITORY_ROOT, "out", "mints.pending.jsonl");
+interface PendingLine {
+  label: string | null;
+  token: TokenId;
+  amount: string;
+  callNonce: string;
+  recipient: { coinPublicKey: string };
+  at: string;
+}
+const pendingMints = (): PendingLine[] =>
+  existsSync(PENDING_FILE)
+    ? readFileSync(PENDING_FILE, "utf8")
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as PendingLine)
+    : [];
+
 const recordedMints = (): MintLine[] =>
   existsSync(MINTS_FILE)
     ? readFileSync(MINTS_FILE, "utf8")
@@ -137,6 +155,27 @@ async function main(): Promise<void> {
   });
   try {
     const before = await session.balances();
+    // Audit C8: resolve mints that were submitted but never recorded, before minting more.
+    {
+      const recordedNonces = new Set(recordedMints().map((m) => (m as unknown as { callNonce?: string }).callNonce));
+      const cleared = new Set((argument("clear-pending") ?? "").split(",").filter(Boolean));
+      const held = new Set(before.shieldedCoinList.map((c) => c.nonce));
+      for (const pending of pendingMints()) {
+        if (recordedNonces.has(pending.callNonce) || cleared.has(pending.callNonce)) continue;
+        if (pending.recipient.coinPublicKey === session.identity.coinPublicKey && held.has(pending.callNonce)) {
+          appendFileSync(
+            MINTS_FILE,
+            `${JSON.stringify({ ts: new Date().toISOString(), label: pending.label, token: pending.token, amount: pending.amount, callNonce: pending.callNonce, recipient: pending.recipient, tx: { status: "SucceedEntirely" }, reconciled: true })}\n`,
+          );
+          log("mint.reconciled", { token: pending.token, callNonce: pending.callNonce });
+          continue;
+        }
+        throw new Error(
+          `a ${pending.token} mint (call nonce ${pending.callNonce.slice(0, 12)}…) was submitted but never recorded; ` +
+            "check the chain, then re-run with --clear-pending <nonce> if it did not land",
+        );
+      }
+    }
     log("wallet.synced", { unshieldedAddress: session.identity.unshieldedAddress, dust: before.dust.toString() });
 
     let recipient: Recipient;
@@ -190,6 +229,10 @@ async function main(): Promise<void> {
       const compiledContract = await compiledContractFor(group.token);
       for (let i = 0; i < todo; i++) {
         const nonce = new Uint8Array(randomBytes(32));
+        appendFileSync(
+          PENDING_FILE,
+          `${JSON.stringify({ label, token: group.token, amount: amount.toString(), callNonce: hexOf(nonce), recipient: { coinPublicKey: recipient.coinPublicKey }, at: new Date().toISOString() } satisfies PendingLine)}\n`,
+        );
         const started = Date.now();
         log("mint.call", { token: group.token, amount: amount.toString(), index: done + i + 1, of: group.count });
         const result = (await submitCallTx(providers as never, {

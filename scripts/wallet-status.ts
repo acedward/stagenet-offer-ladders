@@ -7,6 +7,7 @@
  * The mnemonic file is read in this process only (see src/wallet.ts); nothing secret is
  * printed. Output: one JSON object on stdout; progress lines on stderr.
  */
+import { takeFundingLock } from "../src/state.ts";
 import { fetchLedgerParameters, stagenet, WalletSession, type SeedDerivation } from "../src/wallet.ts";
 
 const argument = (name: string): string | undefined => {
@@ -24,6 +25,8 @@ const network = stagenet();
 const { height, parameters } = await fetchLedgerParameters(network);
 log(`ledger parameters from block ${height}`);
 const started = Date.now();
+// Audit C4: the funding wallet is shared; hold funding.lock like every other tool.
+const fundingLock = takeFundingLock("wallet-status");
 const session = await WalletSession.open({
   network,
   mnemonicFile,
@@ -56,5 +59,6 @@ try {
   console.log(JSON.stringify(out, null, 2));
 } finally {
   await session.close().catch(() => undefined);
+  fundingLock.release();
 }
 process.exit(0);
