@@ -1,0 +1,41 @@
+{
+  "$comment": "stkA / stkB / stkC: open-mint shielded test tokens for the Offer Files stagenet market. Rows in the shape of acedward/mip-0018-midnight-contracts deployments/reference-set.json row SSTAR (template NativeShieldedToken, kind 1 = shielded native, 6 decimals). `mint: open` documents that anyone may call mint(recipient, amount, nonce); the generator ignores the field. Minting is not a deploy step here: scripts/mint.ts mints on demand. Input of scripts/generate-literal-contracts.ts, which writes contracts/generated/<id>.compact and deployments/generated-matrix.json.",
+  "rows": [
+    {
+      "id": "stkA",
+      "name": "stkA",
+      "symbol": "stkA",
+      "decimals": 6,
+      "kind": 1,
+      "template": "NativeShieldedToken",
+      "domain": "stk:stka",
+      "mint": "open",
+      "expect": { "status": "described", "storage": "native" },
+      "steps": [{ "op": "publishMetadata" }]
+    },
+    {
+      "id": "stkB",
+      "name": "stkB",
+      "symbol": "stkB",
+      "decimals": 6,
+      "kind": 1,
+      "template": "NativeShieldedToken",
+      "domain": "stk:stkb",
+      "mint": "open",
+      "expect": { "status": "described", "storage": "native" },
+      "steps": [{ "op": "publishMetadata" }]
+    },
+    {
+      "id": "stkC",
+      "name": "stkC",
+      "symbol": "stkC",
+      "decimals": 6,
+      "kind": 1,
+      "template": "NativeShieldedToken",
+      "domain": "stk:stkc",
+      "mint": "open",
+      "expect": { "status": "described", "storage": "native" },
+      "steps": [{ "op": "publishMetadata" }]
+    }
+  ]
+}
