@@ -2,7 +2,18 @@
 // (fakes; no network).
 import { describe, expect, test } from "bun:test";
 
-import { type MakerOps, type MakerRef, type MakerStatus, type MintRecord, mintAll, mintDecision, registerDecision, registerDustAll } from "../src/makers.ts";
+import {
+  loadMintRecords,
+  type MakerOps,
+  type MakerRef,
+  type MakerStatus,
+  type MintRecord,
+  mintAll,
+  mintDecision,
+  registerDecision,
+  registerDustAll,
+  serializeMintRecords,
+} from "../src/makers.ts";
 
 const TARGET = 1_000_000_000n; // 10 offers × 100 tokens
 const MIN_DUST = 10n ** 15n; // 1 DUST
@@ -168,5 +179,31 @@ describe("mint loop", () => {
     expect(results.map((r) => r.action)).toEqual(["error", "minted"]);
     expect(rec.records["AB-01"]!.status).toBe("pending");
     expect(rec.records["AB-02"]!.status).toBe("minted");
+  });
+});
+
+describe("F-B17 legacy mint receipts", () => {
+  test("a pre-audit success receipt is migrated to minted: partly spent inventory does NOT re-mint", async () => {
+    const legacy = {
+      "AB-01": { txHash: "h", blockHeight: 7, status: "SucceedEntirely", coinNonce: "c".repeat(64), amount: TARGET.toString(), token: "stkA", at: "t" },
+    };
+    const { records, migrated } = loadMintRecords(JSON.parse(JSON.stringify(legacy)));
+    expect(migrated).toBe(true);
+    expect(records["AB-01"]).toMatchObject({ status: "minted", nonce: "c".repeat(64), target: TARGET.toString(), migratedFrom: "SucceedEntirely" });
+    const maker = new FakeMaker(status({ dust: MIN_DUST, giveBalance: TARGET / 2n })); // offers were filled
+    const result = await mintAll(refs(["AB-01"]), async () => maker, TARGET, MIN_DUST, { records });
+    expect(result[0]!.action).toBe("skip-already-minted");
+    expect(maker.mints).toEqual([]);
+    // the v2 file round-trips unchanged
+    const again = loadMintRecords(JSON.parse(serializeMintRecords(records)));
+    expect(again.migrated).toBe(false);
+    expect(again.records).toEqual(records);
+  });
+
+  test("unknown or malformed records are refused, never treated as never-minted", () => {
+    expect(() => loadMintRecords({ "AB-01": { status: "mint-failed" } })).toThrow(/refusing to guess/);
+    expect(() => loadMintRecords({ "AB-01": { status: "SucceedEntirely" } })).toThrow(/coinNonce/);
+    expect(() => loadMintRecords({ version: 2, records: { "AB-01": { status: "minted", nonce: "xyz", target: "1" } } })).toThrow(/nonce/);
+    expect(() => loadMintRecords([1])).toThrow();
   });
 });

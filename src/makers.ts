@@ -140,7 +140,74 @@ export interface MintRecord {
   readonly txHash?: string;
   readonly blockHeight?: number;
   readonly reconciled?: boolean;
+  readonly migratedFrom?: string;
 }
+
+export const MINT_RECORDS_VERSION = 2 as const;
+
+export class MintRecordsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MintRecordsError";
+  }
+}
+
+const HEX64 = /^[0-9a-f]{64}$/u;
+
+/**
+ * Load the maker mint records, migrating the pre-audit format (audit F-B17).
+ *
+ * - v2: `{ version: 2, records: { <slot>: MintRecord } }`.
+ * - legacy (a bare slot map written before `47dce5a`): a successful receipt
+ *   `{ status: "SucceedEntirely", coinNonce, amount, … }` becomes `minted` (nonce =
+ *   coinNonce, target = amount). Any other legacy status is refused.
+ *
+ * Every record is validated; anything unrecognised is REFUSED (fail closed) rather than
+ * treated as "never minted". `migrated` tells the caller to persist before minting.
+ */
+export const loadMintRecords = (raw: unknown): { records: Record<string, MintRecord>; migrated: boolean } => {
+  if (raw === undefined || raw === null) return { records: {}, migrated: false };
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new MintRecordsError("maker-mints.json is not an object");
+  const obj = raw as Record<string, unknown>;
+  const v2 = obj["version"] === MINT_RECORDS_VERSION;
+  const source = (v2 ? obj["records"] : obj) as Record<string, unknown> | undefined;
+  if (typeof source !== "object" || source === null || Array.isArray(source)) throw new MintRecordsError("maker-mints.json has no records");
+  const records: Record<string, MintRecord> = {};
+  let migrated = !v2;
+  for (const [slot, value] of Object.entries(source)) {
+    if (slot === "version") continue;
+    const r = value as Record<string, unknown>;
+    if (typeof r !== "object" || r === null) throw new MintRecordsError(`${slot}: not a record`);
+    if (r["status"] === "minted" || r["status"] === "pending") {
+      if (typeof r["nonce"] !== "string" || !HEX64.test(r["nonce"])) throw new MintRecordsError(`${slot}: bad nonce`);
+      if (typeof r["target"] !== "string" || !/^[0-9]+$/u.test(r["target"])) throw new MintRecordsError(`${slot}: bad target`);
+      records[slot] = r as unknown as MintRecord;
+      continue;
+    }
+    if (r["status"] === "SucceedEntirely") {
+      const nonce = String(r["coinNonce"] ?? "").toLowerCase();
+      const amount = String(r["amount"] ?? "");
+      if (!HEX64.test(nonce) || !/^[0-9]+$/u.test(amount)) throw new MintRecordsError(`${slot}: legacy receipt without coinNonce/amount`);
+      records[slot] = {
+        status: "minted",
+        nonce,
+        target: amount,
+        at: String(r["at"] ?? ""),
+        ...(typeof r["token"] === "string" ? { token: r["token"] } : {}),
+        ...(typeof r["txHash"] === "string" ? { txHash: r["txHash"] } : {}),
+        ...(typeof r["blockHeight"] === "number" ? { blockHeight: r["blockHeight"] } : {}),
+        migratedFrom: "SucceedEntirely",
+      } as MintRecord;
+      migrated = true;
+      continue;
+    }
+    throw new MintRecordsError(`${slot}: unknown mint record status ${JSON.stringify(r["status"])}; refusing to guess`);
+  }
+  return { records, migrated };
+};
+
+export const serializeMintRecords = (records: Readonly<Record<string, MintRecord>>): string =>
+  `${JSON.stringify({ version: MINT_RECORDS_VERSION, records }, null, 2)}\n`;
 
 export const mintAll = (
   makers: readonly MakerRef[],

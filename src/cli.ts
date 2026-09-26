@@ -23,7 +23,7 @@ import { createService, fundingLock, loadServiceConfig } from "./service.ts";
 import { takeServiceLock } from "./service-lock.ts";
 import { startWatchdog } from "./watchdog.ts";
 import { openMakerOps } from "./maker-ops.ts";
-import { type MintRecord, mintAll, registerDustAll } from "./makers.ts";
+import { loadMintRecords, type MintRecord, mintAll, registerDustAll, serializeMintRecords } from "./makers.ts";
 import { settleOffer } from "./settle.ts";
 import type { TokenId } from "./tokens.ts";
 import { verifyCurrentOffers } from "./verify.ts";
@@ -534,11 +534,16 @@ const makersMint: Command = async (flags) => {
   const inventoryOffers = BigInt(flag(flags, "inventory-offers", process.env["INVENTORY_OFFERS"] ?? "10")!);
   const minDust = BigInt(Math.round(Number(flag(flags, "min-dust", "1")) * 1e6)) * 10n ** 9n; // DUST → SPECK
   const recordFile = `${stateDirectory()}/maker-mints.json`;
-  const record: Record<string, MintRecord> = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, "utf8")) : {};
+  const loaded = loadMintRecords(existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, "utf8")) : undefined);
+  const record: Record<string, MintRecord> = loaded.records;
   const persist = (): void => {
     mkdirSync(dirname(recordFile), { recursive: true });
-    writeAtomic(recordFile, `${JSON.stringify(record, null, 2)}\n`); // durable before the next step (audit C8)
+    writeAtomic(recordFile, serializeMintRecords(record)); // durable before the next step (audit C8)
   };
+  if (loaded.migrated) {
+    persist(); // audit F-B17: legacy receipts become `minted` durably BEFORE any wallet opens
+    log(`migrated ${recordFile} to version 2 (${Object.keys(record).length} record(s))`);
+  }
   const clear = flag(flags, "clear-pending");
   if (clear !== undefined) {
     if (record[clear]?.status !== "pending") throw new Error(`${clear} has no pending mint`);
@@ -581,7 +586,7 @@ const makersMint: Command = async (flags) => {
     );
   }
   printResult({ networkId: makers.networkId, results });
-  return results.some((r) => r.action === "error" || r.action === "mint-failed") ? 1 : 0;
+  return results.some((r) => r.action === "error" || r.action === "mint-failed" || r.action === "skip-pending-unresolved") ? 1 : 0;
 };
 
 const notYet = (phase: string): Command => async () => {

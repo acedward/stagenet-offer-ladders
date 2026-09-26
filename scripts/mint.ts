@@ -23,7 +23,7 @@
  * Prints public data only.
  */
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 import { submitCallTx } from "@midnight-ntwrk/midnight-js-contracts";
@@ -113,6 +113,29 @@ interface PendingLine {
   recipient: { coinPublicKey: string };
   at: string;
 }
+/** Audit F-B20: an operator's clearance of a pending mint is recorded durably. */
+const CLEARED_FILE = join(REPOSITORY_ROOT, "out", "mints.cleared.jsonl");
+/** Append one line and fsync it before continuing (a pending line must be durable before submit). */
+const appendDurable = (file: string, line: string): void => {
+  mkdirSync(join(REPOSITORY_ROOT, "out"), { recursive: true });
+  const fd = openSync(file, "a", 0o644);
+  try {
+    writeSync(fd, line);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+};
+const clearedNonces = (): Set<string> =>
+  new Set(
+    existsSync(CLEARED_FILE)
+      ? readFileSync(CLEARED_FILE, "utf8")
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          .map((line) => (JSON.parse(line) as { callNonce: string }).callNonce)
+      : [],
+  );
+
 const pendingMints = (): PendingLine[] =>
   existsSync(PENDING_FILE)
     ? readFileSync(PENDING_FILE, "utf8")
@@ -158,7 +181,12 @@ async function main(): Promise<void> {
     // Audit C8: resolve mints that were submitted but never recorded, before minting more.
     {
       const recordedNonces = new Set(recordedMints().map((m) => (m as unknown as { callNonce?: string }).callNonce));
-      const cleared = new Set((argument("clear-pending") ?? "").split(",").filter(Boolean));
+      for (const nonce of (argument("clear-pending") ?? "").split(",").filter(Boolean)) {
+        if (!pendingMints().some((p) => p.callNonce === nonce)) throw new Error(`--clear-pending ${nonce.slice(0, 12)}…: no such pending mint`);
+        appendDurable(CLEARED_FILE, `${JSON.stringify({ callNonce: nonce, at: new Date().toISOString() })}\n`);
+        log("mint.pending-cleared", { callNonce: nonce });
+      }
+      const cleared = clearedNonces();
       const held = new Set(before.shieldedCoinList.map((c) => c.nonce));
       for (const pending of pendingMints()) {
         if (recordedNonces.has(pending.callNonce) || cleared.has(pending.callNonce)) continue;
@@ -229,7 +257,7 @@ async function main(): Promise<void> {
       const compiledContract = await compiledContractFor(group.token);
       for (let i = 0; i < todo; i++) {
         const nonce = new Uint8Array(randomBytes(32));
-        appendFileSync(
+        appendDurable(
           PENDING_FILE,
           `${JSON.stringify({ label, token: group.token, amount: amount.toString(), callNonce: hexOf(nonce), recipient: { coinPublicKey: recipient.coinPublicKey }, at: new Date().toISOString() } satisfies PendingLine)}\n`,
         );
