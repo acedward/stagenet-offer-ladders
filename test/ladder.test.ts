@@ -124,3 +124,14 @@ describe("configuration validation", () => {
     expect(coloursFromDeployments({ rows: [{ name: "stkA", tokenType: COLOUR_A, other: "zz" }] }, ["stkA", "stkB"])).toEqual({ stkA: COLOUR_A });
   });
 });
+
+describe("F-B22 deploy arguments", () => {
+  test("--force is a flag, not a token id", async () => {
+    const { parseDeployArgs } = await import("../src/tokens.ts");
+    expect(parseDeployArgs([])).toEqual({ tokens: [], force: false });
+    expect(parseDeployArgs(["--force"])).toEqual({ tokens: [], force: true });
+    expect(parseDeployArgs(["stkA", "--force"])).toEqual({ tokens: ["stkA"], force: true });
+    expect(() => parseDeployArgs(["stkZ"])).toThrow(/unknown token/);
+    expect(() => parseDeployArgs(["--forse"])).toThrow(/unknown flag/);
+  });
+});

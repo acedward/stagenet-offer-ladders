@@ -44,6 +44,7 @@ import {
   type Deployment,
   hexOf,
   isTokenId,
+  parseDeployArgs,
   loadDeployment,
   managedDirectory,
   saveDeployment,
@@ -135,8 +136,7 @@ const reconcile = async (
 
 async function main(): Promise<void> {
   const network = stagenet();
-  const requested = process.argv.slice(2);
-  for (const id of requested) if (!isTokenId(id)) throw new Error(`unknown token "${id}"`);
+  const { tokens: requested, force } = parseDeployArgs(process.argv.slice(2));
   const rows = tokenRows().filter((row) => requested.length === 0 || requested.includes(row.id));
 
   const version = await nodeVersion(network.nodeUrl);
@@ -204,7 +204,7 @@ async function main(): Promise<void> {
           // Audit C9: a recorded address whose deployment is not confirmed may still land
           // (a crash during submission can leave "built" after a broadcast); never replace it
           // silently.
-          if (record.address && !process.argv.includes("--force")) {
+          if (record.address && !force) {
             throw new Error(
               `${id}: deployment ${record.address} is recorded as ${record.deployStatus ?? "unknown"} and not confirmed; ` +
                 "check the chain, then re-run with --force to build a new deployment",

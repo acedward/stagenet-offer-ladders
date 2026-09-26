@@ -554,8 +554,10 @@ export class Scheduler {
     // Audit C7: publish what is stored (covers the outbox → kernel switch), re-post a
     // `live` offer the kernel lost, and re-post a `submitted` one that was never indexed.
     // Always the SAME blob: the kernel answers DUPLICATE_OFFER if it already holds it.
+    // Stored offers are published at once; a submitted or live offer is re-posted at most
+    // once per SUBMIT_CONFIRM_SECONDS (audit F-A20: no re-post every tick).
     const waitedLongEnough =
-      record.state !== "submitted" || current.postedAt === undefined || now - Date.parse(current.postedAt) >= cfg.submitConfirmMs;
+      record.state === "stored" || current.postedAt === undefined || now - Date.parse(current.postedAt) >= cfg.submitConfirmMs;
     if (!waitedLongEnough) {
       actions.push("awaiting-index");
       return;

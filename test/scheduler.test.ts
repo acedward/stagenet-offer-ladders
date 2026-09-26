@@ -418,6 +418,10 @@ describe("kernel mode against the mock kernel (API.md dedup: output markers only
     kernel.offers.delete(current.offerId); // the kernel lost it
     const builds = wallet.builds;
     clock.advance(60_000);
+    const early = await scheduler.runTick(); // F-A20: not re-posted every tick
+    expect(early).toMatchObject({ built: 0, posted: 0 });
+    expect(early.slots[0]!.actions).toContain("awaiting-index");
+    clock.advance(5 * 60_000);
     const report = await scheduler.runTick();
     expect(report).toMatchObject({ built: 0, posted: 1 });
     expect(wallet.builds).toBe(builds);
@@ -439,6 +443,8 @@ describe("kernel mode against the mock kernel (API.md dedup: output markers only
     expect(await scheduler.runTick()).toMatchObject({ built: 0, expired: 0 });
     kernel.offers.delete(first.offerId); // even not_found inside the root window → re-post, not rebuild
     expect(await scheduler.runTick()).toMatchObject({ built: 0, expired: 0, posted: 1 });
+    kernel.offers.delete(first.offerId);
+    expect(await scheduler.runTick()).toMatchObject({ built: 0, expired: 0, posted: 0 }); // rate-limited (F-A20)
     clock.advance(HOUR);
     kernel.offers.delete(first.offerId);
     expect(await scheduler.runTick()).toMatchObject({ expired: 1, built: 1 });

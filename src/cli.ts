@@ -589,6 +589,23 @@ const makersMint: Command = async (flags) => {
   return results.some((r) => r.action === "error" || r.action === "mint-failed" || r.action === "skip-pending-unresolved") ? 1 : 0;
 };
 
+/**
+ * slots:unhalt <slot> [--retire] (audit F-A21): recover a halted slot. Without --retire the
+ * slot goes back to `submitted` with its offer and coin claim kept (re-verified next tick);
+ * with --retire the operator confirms the old offer is dead and the coin is freed.
+ */
+const slotsUnhalt: Command = async (flags) => {
+  const slot = flag(flags, "slot");
+  if (slot === undefined) throw new Error("--slot is required");
+  const config = loadServiceConfig(flag(flags, "ladder-file") === undefined ? {} : { ladderFile: flag(flags, "ladder-file")! });
+  const journal = openJournal({ file: config.journalFile, networkId: config.ladders.networkId, mode: config.mode });
+  const how = flags["retire"] === true ? "retire" : "recheck";
+  const record = journal.unhalt(slot, how);
+  log(`${slot}: ${how === "retire" ? "offer retired, coin freed" : "back to submitted, claim kept"}`);
+  printResult({ slot, state: record.state });
+  return 0;
+};
+
 const notYet = (phase: string): Command => async () => {
   log(`not implemented yet: this command is delivered in ${phase} of plan 00053`);
   return 2;
@@ -614,6 +631,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "offers:inspect": offersInspect,
   "offers:settle": (flags) => withServiceLock("offers:settle", () => offersSettle(flags)),
   "offers:verify": offersVerify,
+  "slots:unhalt": (flags) => withServiceLock("slots:unhalt", () => slotsUnhalt(flags)),
   "funding:status": (flags) => withServiceLock("funding:status", () => fundingStatus(flags)),
 };
 

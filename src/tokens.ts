@@ -139,3 +139,22 @@ export const saveDeployment = (deployment: Deployment): void => {
   writeFileSync(temporary, `${JSON.stringify(deployment, null, 2)}\n`, "utf8");
   renameSync(temporary, DEPLOYMENT_FILE);
 };
+
+/**
+ * `deploy-tokens.ts` arguments (audit F-B22): token ids and flags are parsed separately, so
+ * `--force` reaches the override instead of failing as an unknown token.
+ */
+export const parseDeployArgs = (argv: readonly string[]): { tokens: TokenId[]; force: boolean } => {
+  const tokens: TokenId[] = [];
+  let force = false;
+  for (const arg of argv) {
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+    if (arg.startsWith("--")) throw new Error(`unknown flag "${arg}"`);
+    if (!isTokenId(arg)) throw new Error(`unknown token "${arg}"`);
+    tokens.push(arg);
+  }
+  return { tokens, force };
+};

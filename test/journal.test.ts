@@ -194,6 +194,22 @@ describe("audit C2/C3", () => {
     expect(open(file).needsFreshStartAck).toBe(false);
   });
 
+  test("F-A21: a halted slot is recovered only by an explicit operator action (recheck keeps the claim, retire frees it)", () => {
+    const j = open();
+    j.ensureSlot(def("AB-01"));
+    j.beginOffer("AB-01", ref("AB-01", 1));
+    j.halt("AB-01", "OFFER_ID_MISMATCH", "x");
+    expect(() => j.unhalt("AB-02" as never, "recheck")).toThrow();
+    j.unhalt("AB-01", "recheck");
+    expect(j.get("AB-01")!.state).toBe("submitted");
+    expect(j.claimedNonces().has(ref("AB-01", 1).coinNonce)).toBe(true);
+    j.halt("AB-01", "OFFER_ID_MISMATCH", "x");
+    j.unhalt("AB-01", "retire");
+    expect(j.get("AB-01")!.state).toBe("expired");
+    expect(j.get("AB-01")!.history.at(-1)!.code).toBe("OPERATOR_RETIRED");
+    expect(j.claimedNonces().size).toBe(0);
+  });
+
   test("C3: a failed write leaves memory unchanged (candidate → persist → commit)", () => {
     let fail = false;
     const file = join(dir, "state", "j.json");

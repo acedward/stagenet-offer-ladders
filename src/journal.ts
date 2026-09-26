@@ -519,6 +519,24 @@ export class Journal {
     });
   }
 
+  /**
+   * Operator recovery of a halted slot (audit F-A21). `recheck` puts it back to `submitted`
+   * with its offer and coin claim kept, so the next tick verifies it again; `retire` ends
+   * the offer (the operator confirmed it is dead) and frees the coin for a rebuild.
+   */
+  unhalt(slot: string, how: "recheck" | "retire"): SlotRecord {
+    const record = this.#data.slots[slot];
+    if (record?.state !== "halted") throw new JournalError("BAD_TRANSITION", `slot ${slot} is not halted`);
+    if (how === "retire") return this.endOffer(slot, "expired", { code: "OPERATOR_RETIRED" });
+    return this.#mutate((data) => {
+      const r = this.#requireIn(data, slot);
+      r.state = "submitted";
+      r.stateAt = this.#iso();
+      delete r.lastError;
+      return r;
+    });
+  }
+
   /** A failure before any offer existed (build failed, coin vanished): `error` with a retry time. */
   markError(slot: string, code: string, message: string, retryAt: Date): SlotRecord {
     return this.#mutate((data) => {
