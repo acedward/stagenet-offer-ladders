@@ -92,6 +92,31 @@ or wallet state. It is kept out as follows:
 - **One process per wallet.** Two wallet sessions on one mnemonic against one node
   disrupt each other. Run on-chain steps one at a time.
 
+## Offer ladders (project 00053)
+
+Two ladders of fixed-price offers, `AB` (give stkA, want stkB) and `BC` (give stkB, want
+stkC), 10 levels each from 0.8 × mid to 1.2 × mid (`ladders/stagenet.json`). Each offer
+spends exactly one pinned coin (`src/pinned-wallet.ts`, vendored from the Offer Files
+kernel) and is re-built when it expires or is consumed.
+
+| Module | Role |
+|---|---|
+| `src/wallets.ts` | maker wallet generation, derivation, the mode-600 secrets file |
+| `src/addresses.ts` | the public addresses file (`ladders/makers.stagenet.public.json`) |
+| `src/ladder.ts` | price grid, amounts, ladder file |
+| `src/journal.ts` | durable per-slot state machine (atomic JSON) |
+| `src/scheduler.ts` | reconcile tick: expiry, consumption, re-offer, backoff |
+| `src/kernel-client.ts` | `POST /v1/offers`, status reads, retry policy |
+| `src/outbox.ts` | built offers (`swapoffer1…`) + metadata; the destination when `ZSWAP_API` is empty |
+| `src/offer-builder.ts` | pinned `initSwap` → finalize → encode → exact-coin assertion |
+| `src/wallet-session.ts`, `src/ladder-wallet.ts` | wallet facade with a per-wallet pin controller; `wallet-per-slot` and `single-wallet-pinned` modes |
+| `src/status.ts` | `GET /health` (no data), `GET /status` (slot table) |
+
+Commands (`bun src/cli.ts <command>`, or `bun run <command>`): `wallets:generate`,
+`wallets:addresses`, `wallets:check`, `makers:status`, `ladder:once`, `ladder:run`,
+`offers:inspect`; `offers:settle`, `makers:register-dust` and `makers:mint` are in
+progress. Unit tests: `bun test` (no network).
+
 ## License
 
 Apache-2.0 (see `LICENSE`). The token contracts are copies of the reference contracts in
