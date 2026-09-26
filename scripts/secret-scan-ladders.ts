@@ -11,7 +11,8 @@
  * - mnemonic: any 3 consecutive words of any known mnemonic, in order, in a file's
  *   lowercase word stream (any separators);
  * - wallet-assignment: `WALLET=` followed by 12 or more words;
- * - hex-seed: a 128-hex-character run (a 64-byte BIP-39 seed in hex).
+ * - hex-seed: a 128-hex-character run (a 64-byte BIP-39 seed in hex);
+ * - signing-key-json: `{"tag":"schnorr","value":"<64 hex>"}` (a serialised signing key).
  *
  * Skips `.git/` and `node_modules/`, and the secrets files themselves; binary files are
  * skipped; text files up to 50 MB are read.
@@ -54,6 +55,9 @@ for (const mnemonic of mnemonics) {
 
 const walletAssignment = /WALLET\s*=\s*["']?\s*(?:[A-Za-z]+\s+){11,}[A-Za-z]+/u;
 const hexSeed = /(?<![0-9a-fA-F])[0-9a-fA-F]{128}(?![0-9a-fA-F])/u;
+// Audit C15: a signing key serialised as JSON (`{"tag":"schnorr","value":"<64 hex>"}`, the
+// maintenance-key file shape). Public verifying keys are recorded as "schnorr:<hex>" strings.
+const signingKeyJson = /"tag"\s*:\s*"(?:schnorr|ecdsa)"\s*,\s*"value"\s*:\s*"[0-9a-fA-F]{64}"/u;
 
 const findings: string[] = [];
 let scanned = 0;
@@ -76,6 +80,7 @@ const scanFile = (root: string, file: string): void => {
   }
   if (walletAssignment.test(text)) findings.push(`${where} [wallet-assignment]`);
   if (hexSeed.test(text)) findings.push(`${where} [hex-seed]`);
+  if (signingKeyJson.test(text)) findings.push(`${where} [signing-key-json]`);
 };
 
 const walk = (root: string, path: string): void => {

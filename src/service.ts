@@ -30,6 +30,7 @@ import { type ServiceLock, takeServiceLock } from "./service-lock.ts";
 import { Outbox } from "./outbox.ts";
 import { type Log, Scheduler, type SchedulerConfig, type SlotPlan, systemClock } from "./scheduler.ts";
 import { stateDir, takeFundingLock } from "./state.ts";
+import { redact } from "./redact.ts";
 import { startStatusServer, type StatusServer } from "./status.ts";
 import { defaultMakersFile, readMakersFile, readMnemonicFile } from "./wallets.ts";
 
@@ -226,7 +227,9 @@ export interface Service {
 }
 
 /** Log line: `phase=… key=value …`, never a secret (callers pass ids and numbers only). */
-export const formatFields = (fields: Record<string, unknown>): string =>
+export const formatFields = (fields: Record<string, unknown>): string => redact(joinFields(fields));
+
+const joinFields = (fields: Record<string, unknown>): string =>
   Object.entries(fields)
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([key, value]) => {

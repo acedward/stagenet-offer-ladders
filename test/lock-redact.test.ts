@@ -91,4 +91,36 @@ describe("C16 redaction", () => {
     expect(out).not.toContain("ef".repeat(64));
     expect(redact("the wallet sync failed after 30 s")).toBe("the wallet sync failed after 30 s");
   });
+
+  test("F-B23 / F-A22: comma-, JSON- and hyphen-joined phrases and signing-key JSON are redacted", () => {
+    const words = "abandon ability able about above absent absorb abstract absurd abuse access accident".split(" ");
+    for (const joined of [words.join(","), JSON.stringify(words), words.join("-"), words.join(", ")]) {
+      const out = redact(`error: ${joined} end`);
+      expect(out).toContain("[REDACTED-WORDS]");
+      expect(out).not.toContain("absorb");
+    }
+    const key = `{"tag":"schnorr","value":"${"ab".repeat(32)}"}`;
+    expect(redact(`bad key ${key}`)).not.toContain("ab".repeat(32));
+    expect(redact("schnorr:" + "cd".repeat(32))).toContain("cd".repeat(32)); // public verifying-key form stays
+  });
+
+  test("F-B23: the CLI's output boundaries redact (log and printResult)", async () => {
+    const { log, printResult } = await import("../src/cli.ts");
+    const words = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+    const errs: string[] = [];
+    const outs: string[] = [];
+    const e = console.error;
+    const o = console.log;
+    console.error = (m: string) => errs.push(m);
+    console.log = (m: string) => outs.push(m);
+    try {
+      log(`failure: ${words}`);
+      printResult({ error: words });
+    } finally {
+      console.error = e;
+      console.log = o;
+    }
+    expect(errs.join("")).not.toContain("absorb");
+    expect(outs.join("")).not.toContain("absorb");
+  });
 });

@@ -24,6 +24,7 @@ import { takeServiceLock } from "./service-lock.ts";
 import { startWatchdog } from "./watchdog.ts";
 import { openMakerOps } from "./maker-ops.ts";
 import { loadMintRecords, type MintRecord, mintAll, registerDustAll, serializeMintRecords } from "./makers.ts";
+import { redact } from "./redact.ts";
 import { settleOffer } from "./settle.ts";
 import type { TokenId } from "./tokens.ts";
 import { verifyCurrentOffers } from "./verify.ts";
@@ -71,13 +72,14 @@ const flag = (flags: Flags, name: string, fallback?: string): string | undefined
   return value ?? fallback;
 };
 
+/** Every log line and every JSON result pass through `redact` (audit F-B23 / F-A22). */
 export const log = (line: string): void => {
-  console.error(`[${new Date().toISOString()}] ${line}`);
+  console.error(`[${new Date().toISOString()}] ${redact(line)}`);
 };
 
 const jsonReplacer = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);
 export const printResult = (result: unknown): void => {
-  console.log(JSON.stringify(result, jsonReplacer, 2));
+  console.log(redact(JSON.stringify(result, jsonReplacer, 2)));
 };
 
 /** Write a public (non-secret) file atomically, creating its directory. */

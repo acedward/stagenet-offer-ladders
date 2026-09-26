@@ -38,6 +38,8 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 
+import { redact } from "./redact.ts";
+
 export const JOURNAL_VERSION = 1 as const;
 
 export const SLOT_STATES = [
@@ -497,7 +499,7 @@ export class Journal {
       if (outcome === "consumed") delete record.coinNonce;
       if (outcome === "rejected" || outcome === "error") {
         record.consecutiveFailures += 1;
-        record.lastError = { code: detail.code ?? outcome, message: detail.message ?? "", at: this.#iso() };
+        record.lastError = { code: detail.code ?? outcome, message: redact(detail.message ?? ""), at: this.#iso() };
         if (detail.retryAt) record.nextAttemptAt = detail.retryAt.toISOString();
       } else {
         record.consecutiveFailures = 0;
@@ -514,7 +516,7 @@ export class Journal {
       if (!CLAIMING_STATES.includes(record.state) || !record.current) throw new JournalError("BAD_TRANSITION", `slot ${slot}: nothing to halt`);
       record.state = "halted";
       record.stateAt = this.#iso();
-      record.lastError = { code, message: message.slice(0, 500), at: this.#iso() };
+      record.lastError = { code, message: redact(message).slice(0, 500), at: this.#iso() };
       return record;
     });
   }
@@ -547,7 +549,7 @@ export class Journal {
       record.state = "error";
       record.stateAt = this.#iso();
       record.consecutiveFailures += 1;
-      record.lastError = { code, message: message.slice(0, 500), at: this.#iso() };
+      record.lastError = { code, message: redact(message).slice(0, 500), at: this.#iso() };
       record.nextAttemptAt = retryAt.toISOString();
       return record;
     });

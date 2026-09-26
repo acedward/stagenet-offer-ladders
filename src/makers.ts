@@ -1,5 +1,7 @@
 import { Buffer } from "node:buffer";
 
+import { redact } from "./redact.ts";
+
 /**
  * Maker provisioning (plan P4): register each maker's NIGHT for DUST generation, then
  * self-mint its give token as ONE inventory coin.
@@ -98,8 +100,8 @@ const forEachMaker = async (
       options.log?.(`${maker.slot}: ${result.action}`);
     } catch (error) {
       // One maker's failure never stops the others.
-      results.push({ slot: maker.slot, action: "error", error: message(error) });
-      options.log?.(`${maker.slot}: error ${message(error)}`);
+      results.push({ slot: maker.slot, action: "error", error: redact(message(error)) });
+      options.log?.(`${maker.slot}: error ${redact(message(error))}`);
     } finally {
       await ops?.close().catch(() => undefined);
     }
