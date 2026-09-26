@@ -1,0 +1,18 @@
+# Dependencies and local output
+node_modules/
+out/
+*.log
+.DS_Store
+
+# Secrets: never in this repository (see README "Secrets policy")
+.env*
+!.env.example
+*.mnemonic
+secrets/
+.stagenet
+*.stagenet
+# midnight-js' level private-state provider keeps contract maintenance signing keys here
+midnight-level-db/
+
+# Service state (00053): offer journals live outside the repo; never commit one
+*.journal.json
