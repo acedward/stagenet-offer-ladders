@@ -138,28 +138,84 @@ or wallet state. It is kept out as follows:
 
 ## Offer ladders (project 00053)
 
-Two ladders of fixed-price offers, `AB` (give stkA, want stkB) and `BC` (give stkB, want
-stkC), 10 levels each from 0.8 × mid to 1.2 × mid (`ladders/stagenet.json`). Each offer
-spends exactly one pinned coin (`src/pinned-wallet.ts`, vendored from the Offer Files
-kernel) and is re-built when it expires or is consumed.
+Two ladders of fixed-price Offer Files, kept valid by a long-running service:
 
-| Module | Role |
+| Ladder | Offer | Slots | Price (want per give) |
+|---|---|---|---|
+| `AB` | give 100 stkA, want stkB | `AB-01` … `AB-10` | 0.800, 0.844, …, 1.200 (0.8–1.2 × mid 1.0) |
+| `BC` | give 100 stkB, want stkC | `BC-01` … `BC-10` | same grid |
+
+Everything is configured in `ladders/stagenet.json` (mid, spread, levels, give amount).
+Each offer spends exactly **one pinned coin** (`src/pinned-wallet.ts`, vendored from the
+Offer Files kernel) and gives `+100` of the give token for `−round(100 × price)` of the
+want token. The service rebuilds an offer when it expires (default every 60 min, which
+also refreshes the proof's Merkle root) or is consumed, never while it is live.
+
+### Wallet modes
+
+- **`wallet-per-slot`** (production): slot `AB-01` uses maker wallet `AB-01`. Each maker
+  holds one inventory coin of 10 × 100 give tokens; each offer spends that coin and returns
+  the change to the maker inside the offer, so after a fill the change funds the next offer.
+  When a maker runs out, its slot is `depleted` (not an error).
+- **`single-wallet-pinned`** (test, and a future single-wallet setup): all slots share one
+  wallet, each pinned to a distinct coin (`includeNonces` / `excludeNonces` in the ladder
+  file fix the coin pool). `ladders/stagenet.test.json` is the 3 + 3 slot test ladder.
+
+### Runbook (owner)
+
+The 20 maker wallets already exist. Their mnemonics are only in
+`~/.stagenet-offer-ladders/makers.json` (mode 600, directory 700); their public addresses
+are in `ladders/makers.stagenet.public.json`.
+
+1. **Fund NIGHT**: send NIGHT to each maker's **unshielded** address (`mn_addr_stagenet1…`,
+   the `unshieldedAddress` field). The faucet has a CAPTCHA, so this is by hand.
+2. **Register DUST**: `scripts/ladder-run.sh makers:register-dust` registers every maker's
+   NIGHT UTxOs for DUST generation, one maker at a time. Idempotent: makers without NIGHT,
+   or already registered, are skipped.
+3. **Wait for DUST**: `scripts/ladder-run.sh makers:status --slots AB-01,BC-01` (or `all`)
+   shows NIGHT, DUST and shielded balances per maker.
+4. **Mint inventory**: `scripts/ladder-run.sh makers:mint` self-mints each maker's give
+   token (AB → stkA, BC → stkB) as one coin of `INVENTORY_OFFERS` × 100 (default 1,000).
+   Idempotent: a maker with a recorded mint (`state/maker-mints.json`), one that already
+   holds the amount, or one without DUST is skipped.
+5. **Point at the kernel**: once the stagenet kernel is deployed, set `ZSWAP_API`
+   (expected `https://stagenet.api-zswap.zkdojo.com`) and register stkA/stkB/stkC there
+   (colours in `deployments/stagenet.json`). With `ZSWAP_API` empty the service runs in
+   **outbox mode**: offers are built and stored in `state/outbox/`, not posted.
+6. **Run**: `cp .env.example .env`, edit, then `docker compose up -d`. Check
+   `curl http://127.0.0.1:18080/status` (slot table) and `/health`.
+
+`scripts/ladder-run.sh` runs any command in `oven/bun:1.3.11` with a proof server
+(rc.6, pinned by digest) and `~/.stagenet-offer-ladders` mounted at `/state`.
+
+### Commands
+
+| Command | What it does |
 |---|---|
-| `src/wallets.ts` | maker wallet generation, derivation, the mode-600 secrets file |
-| `src/addresses.ts` | the public addresses file (`ladders/makers.stagenet.public.json`) |
-| `src/ladder.ts` | price grid, amounts, ladder file |
-| `src/journal.ts` | durable per-slot state machine (atomic JSON) |
-| `src/scheduler.ts` | reconcile tick: expiry, consumption, re-offer, backoff |
-| `src/kernel-client.ts` | `POST /v1/offers`, status reads, retry policy |
-| `src/outbox.ts` | built offers (`swapoffer1…`) + metadata; the destination when `ZSWAP_API` is empty |
-| `src/offer-builder.ts` | pinned `initSwap` → finalize → encode → exact-coin assertion |
-| `src/wallet-session.ts`, `src/ladder-wallet.ts` | wallet facade with a per-wallet pin controller; `wallet-per-slot` and `single-wallet-pinned` modes |
-| `src/status.ts` | `GET /health` (no data), `GET /status` (slot table) |
+| `wallets:generate --count 20 --ladders AB,BC` | create the maker wallets (refuses to overwrite) |
+| `wallets:addresses` / `wallets:check` | write / verify the public addresses file |
+| `makers:status [--slots …]` | sync makers one at a time; NIGHT, DUST, shielded balances |
+| `makers:register-dust [--slots …]` | register NIGHT for DUST generation |
+| `makers:mint [--slots …] [--inventory-offers 10]` | self-mint the inventory coin |
+| `ladder:once` / `ladder:run` | one reconcile tick / the service loop (SIGTERM stops after the current slot) |
+| `offers:verify` | decode the current offers and check them against the journal and the grid |
+| `offers:inspect --offer-id …` | decode one stored offer |
+| `offers:settle --slot AB-02 --pay-with <nonce>` | test taker: settle a stored offer with the funding wallet, paying with a pinned coin |
+| `funding:status` | balances of the funding wallet |
 
-Commands (`bun src/cli.ts <command>`, or `bun run <command>`): `wallets:generate`,
-`wallets:addresses`, `wallets:check`, `makers:status`, `ladder:once`, `ladder:run`,
-`offers:inspect`; `offers:settle`, `makers:register-dust` and `makers:mint` are in
-progress. Unit tests: `bun test` (no network).
+### State, health and safety
+
+- Journal and outbox: `$STATE_DIR` (compose: the `ladder-data` volume). The journal is
+  written atomically; a slot's offer is journaled as `posting` before it leaves the
+  process, so a crash re-posts the same offer instead of building a second one.
+- `GET /health` returns `ok` (no data) while the scheduler makes progress;
+  `GET /status` returns the slot table (no secrets).
+- Kernel refusals (conflict, malformed, not sponsored) are journaled with their code and
+  retried only by rebuilding after a backoff; the refused offer is never re-sent.
+- The funding wallet is shared: every process that opens it holds
+  `~/.stagenet-offer-ladders/funding.lock` (00052's `src/state.ts`). Set
+  `FUNDING_LOCK_HELD=true` only when an operator already holds the lock.
+- Unit tests: `bun test` (no network).
 
 ## License
 

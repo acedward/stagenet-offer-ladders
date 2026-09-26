@@ -1,0 +1,11 @@
+node_modules
+out
+.git
+.env*
+!.env.example
+*.journal.json
+*.mnemonic
+secrets
+.stagenet
+*.stagenet
+test

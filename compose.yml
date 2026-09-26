@@ -1,0 +1,45 @@
+# Offer ladder service + proof server (project 00053).
+#
+#   cp .env.example .env        # then edit; secrets are NOT set here (file paths only)
+#   docker compose up -d        # production: wallet-per-slot, maker secrets read-only
+#   docker compose -f compose.yml -f compose.test.yml up -d   # single-wallet test mode
+#
+# Secrets: the maker secrets directory ($SECRETS_DIR, default ~/.stagenet-offer-ladders,
+# mode 700 with makers.json mode 600) is mounted READ-ONLY. The funding wallet file is
+# mounted only by compose.test.yml. The journal and outbox live in the `ladder-data` volume.
+name: ${COMPOSE_PROJECT_NAME:-stagenet-offer-ladders}
+
+services:
+  proof-server:
+    image: midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
+    restart: unless-stopped
+
+  ladder:
+    build: .
+    image: stagenet-offer-ladders:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    depends_on:
+      - proof-server
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MN_PROOF_SERVER_URL: http://proof-server:6300
+      STATE_DIR: /data
+      STK_STATE_DIR: /secrets
+      MAKERS_FILE: /secrets/makers.json
+      STATUS_PORT: "8080"
+    volumes:
+      - ${SECRETS_DIR:-~/.stagenet-offer-ladders}:/secrets:ro
+      - ladder-data:/data
+    ports:
+      - "127.0.0.1:${STATUS_HOST_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15m
+      retries: 3
+
+volumes:
+  ladder-data:
