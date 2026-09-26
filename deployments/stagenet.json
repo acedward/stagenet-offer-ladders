@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "network": {
+    "name": "stagenet",
+    "networkId": "stagenet",
+    "node": "https://rpc.stagenet.shielded.tools",
+    "indexer": "https://indexer.stagenet.shielded.tools/api/v4/graphql",
+    "nodeVersion": "2.0.0-d9729c13"
+  },
+  "source": {
+    "contracts": "generated from acedward/mip-0018-midnight-contracts @ 7d9f6596d66e3953eb6b14ce152f09169de61eda (SSTAR shape; contracts/README.md)",
+    "compiler": "compactc 0.34.0 (LFDT-Minokawa release, aarch64 linux-musl archive SHA-256 d3e292c4f48e257dcd6b3d3e3e4743d7d8ea0729f48953eab91a366d44cd026d)"
+  },
+  "tokens": {
+    "stkA": {
+      "id": "stkA",
+      "name": "stkA",
+      "symbol": "stkA",
+      "decimals": 6,
+      "domain": "stk:stka",
+      "domainSepHex": "73746b3a73746b61000000000000000000000000000000000000000000000000",
+      "artefactManifestSha256": "9f7ff982ab877e73eea8ce24e97907859d3c87dfbea43b12952acef02d7f7876",
+      "updatedAt": "2026-09-26T15:03:15.070Z",
+      "address": "e8551694e54075e139a7910c882e5f9e45418db744414a3d5908e2e95c4c1d67",
+      "maintenanceVerifyingKey": "[object Object]",
+      "deployStatus": "SucceedEntirely",
+      "deploy": {
+        "txId": "006a8475353a93942838399f096f2eaed7858297abbd026678f9afc77ce178976e",
+        "txHash": "69f1a915f0b227e7e7a5873758cff9e5e87251120458cf910dae356041ffb550",
+        "identifiers": [
+          "006a8475353a93942838399f096f2eaed7858297abbd026678f9afc77ce178976e",
+          "00ffc4fcd87d69be798e3b50fb81499d17807696221c1d7d07f0b4c545943b058f"
+        ],
+        "blockHeight": 632347,
+        "blockHash": "7a5ac84f4b915144f14abf52d9966dc65cbcf086ba1a89758ed52812272b5457",
+        "blockTimestamp": "2026-09-26T15:02:42.000Z",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "4177570231356222",
+          "estimatedFees": "4177570231356222"
+        },
+        "at": "2026-09-26T15:02:56.354Z"
+      },
+      "publishMetadata": {
+        "txId": "0041ed9db3991eaf5014a2ada1ba8fb9b905984f78db6fc8e1611b4bd463df3fcd",
+        "txHash": "fbf0d2c5bc3448ac23be72e4d48bff1f66ea0c4e80e51761813a8ec4911db60e",
+        "identifiers": [
+          "00640972ed23ee829794900d85e6dad9dbbca83efd04d5331df7e9d83e80eecda1",
+          "0041ed9db3991eaf5014a2ada1ba8fb9b905984f78db6fc8e1611b4bd463df3fcd"
+        ],
+        "blockHeight": 632350,
+        "blockHash": "89cfe20bf3355be9926d88399486f68da1c2690adbf4c8596466ff5ee2860790",
+        "blockTimestamp": "2026-09-26T15:03:00.000Z",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "194705142857143",
+          "estimatedFees": "194705142857143"
+        },
+        "at": "2026-09-26T15:03:14.592Z"
+      },
+      "tokenColor": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934",
+      "colourChecks": {
+        "rawTokenType": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934",
+        "persistentCommit": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934",
+        "equal": true
+      }
+    },
+    "stkB": {
+      "id": "stkB",
+      "name": "stkB",
+      "symbol": "stkB",
+      "decimals": 6,
+      "domain": "stk:stkb",
+      "domainSepHex": "73746b3a73746b62000000000000000000000000000000000000000000000000",
+      "artefactManifestSha256": "8102f90a83cfd45e11fdb6c4ec2775a4ed93ca0b6c43c2ef66b901297a7cf654",
+      "updatedAt": "2026-09-26T15:03:51.149Z",
+      "address": "9526b72c34309d2deb426fe5155d601437680f53ca305728a1417b4e8c5eb7e0",
+      "maintenanceVerifyingKey": "[object Object]",
+      "deployStatus": "SucceedEntirely",
+      "deploy": {
+        "txId": "00de44a6edffca14b7464399acd255185b2e0926c98c6a4e573756ca931945a8f2",
+        "txHash": "a38d498604e4c21f0207942779966d94ed3dd4dca682970772e27d4d811bbac9",
+        "identifiers": [
+          "00de44a6edffca14b7464399acd255185b2e0926c98c6a4e573756ca931945a8f2",
+          "000dbf7b30a742c347a8f8263e6f0f6671178b3769a0f591e9b13ca2fdc8d8f032"
+        ],
+        "blockHeight": 632353,
+        "blockHash": "665d7858e104de9f555bae58817fbb79071986bc799a17a35442d2d0abfa1c8c",
+        "blockTimestamp": "2026-09-26T15:03:18.000Z",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "4180626057142858",
+          "estimatedFees": "4180626057142858"
+        },
+        "at": "2026-09-26T15:03:32.316Z"
+      },
+      "publishMetadata": {
+        "txId": "00a247ac87f7fb32ce389ec1883c7e55d0d67fdd845845512cad728e4b2c932011",
+        "txHash": "2c492d57080ec45d05cc695078a48398f140151651ebbcf1bc085ea6fad702bd",
+        "identifiers": [
+          "001845befed5c085b463aa9afaa8c9e4bf035896df0d07132a147d645e472e84a9",
+          "00a247ac87f7fb32ce389ec1883c7e55d0d67fdd845845512cad728e4b2c932011"
+        ],
+        "blockHeight": 632356,
+        "blockHash": "dd8ddc1f5889559ec468ea2b7d1778170ee5c3fa008a8fa82bd722a118d17ae0",
+        "blockTimestamp": "2026-09-26T15:03:36.001Z",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "194710857142858",
+          "estimatedFees": "194710857142858"
+        },
+        "at": "2026-09-26T15:03:50.647Z"
+      },
+      "tokenColor": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+      "colourChecks": {
+        "rawTokenType": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+        "persistentCommit": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+        "equal": true
+      }
+    },
+    "stkC": {
+      "id": "stkC",
+      "name": "stkC",
+      "symbol": "stkC",
+      "decimals": 6,
+      "domain": "stk:stkc",
+      "domainSepHex": "73746b3a73746b63000000000000000000000000000000000000000000000000",
+      "artefactManifestSha256": "d91b77dafe7b8ec41be46f1dcae0fc2189328ffb5d99196567db30993c42f532",
+      "updatedAt": "2026-09-26T15:04:26.236Z",
+      "address": "c03b55f7cf508a0c92ff15049fa3c4638e9b585f635a122254332a32556599b8",
+      "maintenanceVerifyingKey": "[object Object]",
+      "deployStatus": "SucceedEntirely",
+      "deploy": {
+        "txId": "00249d252b9925e8120b17c80137e94cbabc211146365be7c09b0a20a3d19b3c6a",
+        "txHash": "fae2f9f46ff1827ce5eba1fc9d735fe8559b891df074a5d0a359d4bcd5a37806",
+        "identifiers": [
+          "00249d252b9925e8120b17c80137e94cbabc211146365be7c09b0a20a3d19b3c6a",
+          "0063822cc2dbeae727a176d8773560c2515fe5c3238c8fa59efcd80e24cf2d0621"
+        ],
+        "blockHeight": 632359,
+        "blockHash": "c65aa02ef6e3ef9a6cd1fa716f3435f86c72de997ea9f5d6748695e34fa84393",
+        "blockTimestamp": "2026-09-26T15:03:54.000Z",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "4180626057142858",
+          "estimatedFees": "4180626057142858"
+        },
+        "at": "2026-09-26T15:04:08.343Z"
+      },
+      "publishMetadata": {
+        "txId": "00a37e3337e15f489a914ecc279b2997e08cc79369a0ff9d4b4d885523f21518cb",
+        "txHash": "58875390b5142dc8203e214e5f71529bcb87912b2837b206ac20ceaa0f94fb1f",
+        "identifiers": [
+          "0000ba09055e565ef4b94a5661a4e40a9497862250b1bbeabbef1b1ec26b02bcdf",
+          "00a37e3337e15f489a914ecc279b2997e08cc79369a0ff9d4b4d885523f21518cb"
+        ],
+        "blockHeight": 632362,
+        "blockHash": "cb2c8eba89cf70a83d68ef2632b01110a1180ca538dff67f55085ff99a8f6575",
+        "blockTimestamp": "2026-09-26T15:04:12.000Z",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "194710857142858",
+          "estimatedFees": "194710857142858"
+        },
+        "at": "2026-09-26T15:04:25.743Z"
+      },
+      "tokenColor": "95778c5f7234237d696969032d8dcfe22936c98927e4d46483c56d11d9c9883b",
+      "colourChecks": {
+        "rawTokenType": "95778c5f7234237d696969032d8dcfe22936c98927e4d46483c56d11d9c9883b",
+        "persistentCommit": "95778c5f7234237d696969032d8dcfe22936c98927e4d46483c56d11d9c9883b",
+        "equal": true
+      }
+    }
+  }
+}
