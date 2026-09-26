@@ -220,7 +220,12 @@ export class WalletSession {
           UnshieldedWallet(config).startWithPublicKey(PublicKey.fromKeyStore(keys.unshieldedKeystore)),
         dust: (config) => DustWallet(config).startWithSecretKey(keys.dustSecretKey, options.dustParameters),
       });
-      await facade.start(keys.shieldedSecretKeys, keys.dustSecretKey);
+      try {
+        await facade.start(keys.shieldedSecretKeys, keys.dustSecretKey);
+      } catch (error) {
+        await facade.stop().catch(() => undefined); // audit C5: no half-started facade
+        throw error;
+      }
       return new WalletSession(facade, keys, identity, pins, options);
     } catch (error) {
       keys.clear();

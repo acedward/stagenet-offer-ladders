@@ -4,9 +4,12 @@
 #   docker compose up -d        # production: wallet-per-slot, maker secrets read-only
 #   docker compose -f compose.yml -f compose.test.yml up -d   # single-wallet test mode
 #
-# Secrets: the maker secrets directory ($SECRETS_DIR, default ~/.stagenet-offer-ladders,
-# mode 700 with makers.json mode 600) is mounted READ-ONLY. The funding wallet file is
-# mounted only by compose.test.yml. The journal and outbox live in the `ladder-data` volume.
+# Secrets: the maker secrets file ($SECRETS_DIR/makers.json, mode 600) is mounted
+# READ-ONLY as a single file; the funding wallet file only by compose.test.yml.
+# State: the journal, outbox and service.lock live in the HOST directory $STATE_DIR_HOST
+# (default ~/.stagenet-offer-ladders/state), the same one scripts/ladder-run.sh uses, so
+# `docker compose down -v` cannot delete it and the helper and the service share one
+# journal and one lock (audit C1, C4). Never delete that directory while offers are live.
 name: ${COMPOSE_PROJECT_NAME:-stagenet-offer-ladders}
 
 services:
@@ -26,12 +29,12 @@ services:
     environment:
       MN_PROOF_SERVER_URL: http://proof-server:6300
       STATE_DIR: /data
-      STK_STATE_DIR: /secrets
       MAKERS_FILE: /secrets/makers.json
+      MAKERS_DIR_CHECK: "false"
       STATUS_PORT: "8080"
     volumes:
-      - ${SECRETS_DIR:-~/.stagenet-offer-ladders}:/secrets:ro
-      - ladder-data:/data
+      - ${SECRETS_DIR:-~/.stagenet-offer-ladders}/makers.json:/secrets/makers.json:ro
+      - ${STATE_DIR_HOST:-~/.stagenet-offer-ladders/state}:/data
     ports:
       - "127.0.0.1:${STATUS_HOST_PORT:-18080}:8080"
     healthcheck:
@@ -41,5 +44,3 @@ services:
       start_period: 15m
       retries: 3
 
-volumes:
-  ladder-data:

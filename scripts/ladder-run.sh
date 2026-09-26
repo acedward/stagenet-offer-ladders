@@ -8,9 +8,12 @@
 #   FUNDING_WALLET_FILE_HOST  mnemonic file of the funding wallet (single-wallet mode,
 #                             offers:settle, funding:status); mounted READ-ONLY, only its
 #                             path is passed. Never put the phrase itself in the environment.
-#   STATE_HOST                private state directory [$HOME/.stagenet-offer-ladders]
-#                             (makers.json, funding.lock, journals, outbox), mounted at /state
-#   STATE_SUBDIR              journal + outbox directory under it [state]
+#   STATE_HOST                private directory [$HOME/.stagenet-offer-ladders] (makers.json,
+#                             00052's funding.lock and maintenance keys)
+#   STATE_SUBDIR              journal + outbox + service.lock directory under it [state]; the
+#                             same host directory Compose mounts at /data (audit C4)
+#   Mounts: $STATE_HOST/makers.json read-only; $STATE_HOST/$STATE_SUBDIR at /data; the whole
+#   $STATE_HOST only when the funding wallet is used (to take funding.lock) (audit C14).
 #   PROOF_CONTAINER           join this running proof server instead of starting one
 #   RUN_NAME                  container name [o53-run-$$]
 #   Passed through when set: LADDER_FILE MODE ZSWAP_API OFFER_TTL_MINUTES RECONCILE_SECONDS
@@ -68,17 +71,22 @@ if [ -z "$PROOF" ]; then
   curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null || { echo "proof server did not become healthy" >&2; exit 1; }
 fi
 
+mkdir -p "$STATE_HOST/$STATE_SUBDIR"
 args=(docker run --rm --name "$RUN_NAME" --network "container:$PROOF"
   -v "$ROOT":/work -w /work
-  -v "$STATE_HOST":/state
-  -e STK_STATE_DIR=/state -e MAKERS_FILE=/state/makers.json -e "STATE_DIR=/state/$STATE_SUBDIR"
+  -v "$STATE_HOST/$STATE_SUBDIR":/data -e STATE_DIR=/data
   -e MN_PROOF_SERVER_URL=http://127.0.0.1:6300)
+if [ -f "$STATE_HOST/makers.json" ]; then
+  args+=(-v "$STATE_HOST/makers.json":/secrets/makers.json:ro -e MAKERS_FILE=/secrets/makers.json -e MAKERS_DIR_CHECK=false)
+fi
 if [ -n "${FUNDING_WALLET_FILE_HOST:-}" ]; then
   [ -f "$FUNDING_WALLET_FILE_HOST" ] || { echo "no mnemonic file at the given path" >&2; exit 2; }
-  args+=(-v "$FUNDING_WALLET_FILE_HOST":/secrets/stagenet:ro -e FUNDING_WALLET_FILE=/secrets/stagenet)
+  args+=(-v "$FUNDING_WALLET_FILE_HOST":/secrets/stagenet:ro -e FUNDING_WALLET_FILE=/secrets/stagenet
+    -v "$STATE_HOST":/funding-state -e STK_STATE_DIR=/funding-state)
 fi
 for var in LADDER_FILE MODE ZSWAP_API OFFER_TTL_MINUTES RECONCILE_SECONDS EXPIRY_GRACE_SECONDS RETRY_BASE_SECONDS \
-  MAX_BUILDS_PER_TICK FUNDING_LOCK_HELD STATUS_PORT JOURNAL_RESET WALLET_STAGGER_MS; do
+  MAX_BUILDS_PER_TICK FUNDING_LOCK_HELD STATUS_PORT JOURNAL_RESET WALLET_STAGGER_MS ROOT_WINDOW_MINUTES \
+  SUBMIT_CONFIRM_SECONDS BUILD_TIMEOUT_SECONDS EXPECTED_NODE_VERSION WATCHDOG_SECONDS; do
   if [ -n "${!var:-}" ]; then args+=(-e "$var=${!var}"); fi
 done
 args+=("$BUN_IMAGE" bun src/cli.ts "$@")

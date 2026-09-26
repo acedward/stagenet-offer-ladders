@@ -20,6 +20,8 @@ import { inspectOffer } from "./offer-inspect.ts";
 import { openJournal } from "./journal.ts";
 import { Outbox } from "./outbox.ts";
 import { createService, fundingLock, loadServiceConfig } from "./service.ts";
+import { takeServiceLock } from "./service-lock.ts";
+import { startWatchdog } from "./watchdog.ts";
 import { openMakerOps } from "./maker-ops.ts";
 import { mintAll, registerDustAll } from "./makers.ts";
 import { settleOffer } from "./settle.ts";
@@ -87,6 +89,20 @@ const writePublicFile = (path: string, contents: string): void => {
 };
 
 const DEFAULT_LADDER_FILE = "ladders/stagenet.json";
+
+/** The shared state directory (journal, outbox, service.lock): helper and Compose use the same one. */
+const stateDirectory = (): string =>
+  process.env["STATE_DIR"]?.trim() || `${process.env["HOME"] ?? "/root"}/.stagenet-offer-ladders/state`;
+
+/** Audit C4: every wallet-opening command holds the per-state-directory service lock. */
+const withServiceLock = async <T>(command: string, fn: () => Promise<T>): Promise<T> => {
+  const lock = takeServiceLock(stateDirectory(), command);
+  try {
+    return await fn();
+  } finally {
+    lock.release();
+  }
+};
 const DEFAULT_PUBLIC_JSON = "ladders/makers.stagenet.public.json";
 
 // ---------------------------------------------------------------------------
@@ -403,9 +419,20 @@ const ladderRun: Command = async (flags) => {
   };
   process.on("SIGINT", () => stop("SIGINT"));
   process.on("SIGTERM", () => stop("SIGTERM"));
+  // Audit C6: exit when no progress is made, so the restart policy recovers the process.
+  const watchdog = startWatchdog({
+    lastProgress: () => service.scheduler.lastProgressAt,
+    startedAt: Date.now(),
+    limitMs: config.watchdogMs,
+    onStall: (idleMs) => {
+      log(`fatal: no scheduler progress for ${Math.round(idleMs / 1000)} s (watchdog ${config.watchdogMs / 1000} s); exiting`);
+      process.exit(70);
+    },
+  });
   try {
     await service.scheduler.loop(config.reconcileMs, controller.signal);
   } finally {
+    watchdog.stop();
     await service.close();
   }
   return 0;
@@ -547,15 +574,15 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "wallets:generate": walletsGenerate,
   "wallets:addresses": walletsAddresses,
   "wallets:check": walletsCheck,
-  "makers:status": makersStatus,
-  "makers:register-dust": makersRegisterDust,
-  "makers:mint": makersMint,
+  "makers:status": (flags) => withServiceLock("makers:status", () => makersStatus(flags)),
+  "makers:register-dust": (flags) => withServiceLock("makers:register-dust", () => makersRegisterDust(flags)),
+  "makers:mint": (flags) => withServiceLock("makers:mint", () => makersMint(flags)),
   "ladder:once": ladderOnce,
   "ladder:run": ladderRun,
   "offers:inspect": offersInspect,
-  "offers:settle": offersSettle,
+  "offers:settle": (flags) => withServiceLock("offers:settle", () => offersSettle(flags)),
   "offers:verify": offersVerify,
-  "funding:status": fundingStatus,
+  "funding:status": (flags) => withServiceLock("funding:status", () => fundingStatus(flags)),
 };
 
 export const main = async (argv: readonly string[]): Promise<number> => {

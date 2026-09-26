@@ -248,8 +248,13 @@ export const readMakersFile = (path: string): MakersFile => {
   }
   if (stats.isSymbolicLink() || !stats.isFile()) throw new SecretsFileError("PERMISSIONS", path, "must be a regular file (not a symlink)");
   if ((stats.mode & 0o077) !== 0) throw new SecretsFileError("PERMISSIONS", path, "must not be accessible by group or others (chmod 600)");
-  const dirStats = lstatSync(dirname(path));
-  if ((dirStats.mode & 0o077) !== 0) throw new SecretsFileError("PERMISSIONS", dirname(path), "directory must be mode 700");
+  // The directory check is skipped only when the file is bind-mounted on its own
+  // (MAKERS_DIR_CHECK=false in compose / the helper): the container's mount point is not the
+  // host directory, whose mode 700 the host keeps.
+  if (process.env["MAKERS_DIR_CHECK"] !== "false") {
+    const dirStats = lstatSync(dirname(path));
+    if ((dirStats.mode & 0o077) !== 0) throw new SecretsFileError("PERMISSIONS", dirname(path), "directory must be mode 700");
+  }
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
@@ -277,6 +282,9 @@ export const readMakersFile = (path: string): MakersFile => {
     }
     return { slot: maker.slot, ladder: maker.ladder, level: maker.level, mnemonic };
   });
+  if (new Set(makers.map((m) => m.mnemonic)).size !== makers.length) {
+    throw new SecretsFileError("INVALID", path, "two slots hold the same wallet (duplicate mnemonic)");
+  }
   return {
     version: MAKERS_FILE_VERSION,
     networkId: data.networkId,

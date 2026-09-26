@@ -63,19 +63,41 @@ export interface SessionFactoryOptions {
   readonly syncTimeoutMs?: number;
 }
 
+/** What the pool needs from a session (a `WalletSession`, or a fake in tests). */
+export interface PoolSession {
+  synced(): Promise<unknown>;
+  close(): Promise<void>;
+}
+
 /** A pool of lazily opened, kept-open sessions keyed by wallet id. */
 export class SessionPool implements WalletPort {
   readonly #mnemonics: ReadonlyMap<string, string>;
   readonly #options: SessionFactoryOptions;
   readonly #staggerMs: number;
   readonly #sessions = new Map<string, Promise<{ session: WalletSession; wallet: LadderWallet }>>();
+  readonly #open: (walletId: string, mnemonic: string) => Promise<WalletSession>;
   #lastOpenAt = 0;
   #opening: Promise<unknown> = Promise.resolve();
 
-  constructor(mnemonics: ReadonlyMap<string, string>, options: SessionFactoryOptions, staggerMs = 5_000) {
+  constructor(
+    mnemonics: ReadonlyMap<string, string>,
+    options: SessionFactoryOptions,
+    staggerMs = 5_000,
+    open?: (walletId: string, mnemonic: string) => Promise<WalletSession>,
+  ) {
     this.#mnemonics = mnemonics;
     this.#options = options;
     this.#staggerMs = staggerMs;
+    this.#open =
+      open ??
+      ((walletId, mnemonic) =>
+        WalletSession.open({
+          network: this.#options.network,
+          mnemonic,
+          dustParameters: this.#options.dustParameters,
+          syncTimeoutMs: this.#options.syncTimeoutMs ?? 20 * 60 * 1000,
+          log: (line) => this.#options.log(`${walletId}: ${line}`),
+        }));
   }
 
   get(walletId: string): Promise<LadderWallet> {
@@ -88,14 +110,15 @@ export class SessionPool implements WalletPort {
         const wait = this.#lastOpenAt + this.#staggerMs - Date.now();
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         this.#lastOpenAt = Date.now();
-        const session = await WalletSession.open({
-          network: this.#options.network,
-          mnemonic,
-          dustParameters: this.#options.dustParameters,
-          syncTimeoutMs: this.#options.syncTimeoutMs ?? 20 * 60 * 1000,
-          log: (line) => this.#options.log(`${walletId}: ${line}`),
-        });
-        await session.synced();
+        const session = await this.#open(walletId, mnemonic);
+        try {
+          await session.synced();
+        } catch (error) {
+          // Audit C5: never leave a running facade behind a failed sync; a retry would
+          // otherwise open a second facade on the same seed.
+          await session.close().catch(() => undefined);
+          throw error;
+        }
         return { session, wallet: ladderWalletOf(walletId, session) };
       });
       this.#opening = opened.catch(() => undefined);

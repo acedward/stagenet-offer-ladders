@@ -19,6 +19,7 @@ import * as ledger from "@midnightntwrk/ledger-v9";
 
 import type { WalletNetwork } from "./network.ts";
 import { collectNullifiers } from "./offer-builder.ts";
+import { withTimeout } from "./scheduler.ts";
 import { WalletSession } from "./wallet-session.ts";
 
 export interface SettleArgs {
@@ -30,6 +31,8 @@ export interface SettleArgs {
   /** Nonce of the taker's coin to pay with (pinned). */
   readonly payWithNonce: string;
   readonly ttlMs?: number;
+  /** Deadline for the indexer to report the settlement final (audit C6; default 10 min). */
+  readonly inclusionTimeoutMs?: number;
   readonly log: (line: string) => void;
 }
 
@@ -65,7 +68,7 @@ export const settleOffer = async (args: SettleArgs): Promise<SettleResult> => {
   log(`submitted settlement ${String(txId).slice(0, 16)}…; waiting for the indexer`);
   setNetworkId(network.networkId);
   const indexer = indexerPublicDataProvider({ queryURL: network.indexerHttpUrl, subscriptionURL: network.indexerWsUrl });
-  const data = await indexer.watchForTxData(txId as never);
+  const data = await withTimeout(indexer.watchForTxData(txId as never), args.inclusionTimeoutMs ?? 10 * 60_000, "settlement inclusion");
   return {
     offerId,
     offerNullifiers,
