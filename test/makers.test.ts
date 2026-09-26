@@ -206,4 +206,11 @@ describe("F-B17 legacy mint receipts", () => {
     expect(() => loadMintRecords({ version: 2, records: { "AB-01": { status: "minted", nonce: "xyz", target: "1" } } })).toThrow(/nonce/);
     expect(() => loadMintRecords([1])).toThrow();
   });
+
+  test("F-B30: a present but invalid document is refused, never an empty history; only a missing file is empty", () => {
+    expect(loadMintRecords(undefined, false)).toEqual({ records: {}, migrated: false });
+    for (const bad of [null, 3, "x", { version: 3 }, { version: 2 }, { version: 2, records: [] }, { version: 2, records: {}, extra: 1 }, { version: "2", records: {} }]) {
+      expect(() => loadMintRecords(bad)).toThrow();
+    }
+  });
 });

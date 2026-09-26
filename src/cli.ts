@@ -536,7 +536,8 @@ const makersMint: Command = async (flags) => {
   const inventoryOffers = BigInt(flag(flags, "inventory-offers", process.env["INVENTORY_OFFERS"] ?? "10")!);
   const minDust = BigInt(Math.round(Number(flag(flags, "min-dust", "1")) * 1e6)) * 10n ** 9n; // DUST → SPECK
   const recordFile = `${stateDirectory()}/maker-mints.json`;
-  const loaded = loadMintRecords(existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, "utf8")) : undefined);
+  const present = existsSync(recordFile);
+  const loaded = loadMintRecords(present ? JSON.parse(readFileSync(recordFile, "utf8")) : undefined, present);
   const record: Record<string, MintRecord> = loaded.records;
   const persist = (): void => {
     mkdirSync(dirname(recordFile), { recursive: true });

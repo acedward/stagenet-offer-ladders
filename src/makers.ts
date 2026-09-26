@@ -167,17 +167,23 @@ const HEX64 = /^[0-9a-f]{64}$/u;
  * Every record is validated; anything unrecognised is REFUSED (fail closed) rather than
  * treated as "never minted". `migrated` tells the caller to persist before minting.
  */
-export const loadMintRecords = (raw: unknown): { records: Record<string, MintRecord>; migrated: boolean } => {
-  if (raw === undefined || raw === null) return { records: {}, migrated: false };
-  if (typeof raw !== "object" || Array.isArray(raw)) throw new MintRecordsError("maker-mints.json is not an object");
+export const loadMintRecords = (raw: unknown, present = true): { records: Record<string, MintRecord>; migrated: boolean } => {
+  // Audit F-B30: only a MISSING file is an empty history; a present document must be valid.
+  if (!present) return { records: {}, migrated: false };
+  if (raw === undefined || raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new MintRecordsError("maker-mints.json is present but not an object; refusing to treat it as an empty history");
+  }
   const obj = raw as Record<string, unknown>;
+  if ("version" in obj && obj["version"] !== MINT_RECORDS_VERSION) {
+    throw new MintRecordsError(`maker-mints.json has unsupported version ${JSON.stringify(obj["version"])}`);
+  }
   const v2 = obj["version"] === MINT_RECORDS_VERSION;
   const source = (v2 ? obj["records"] : obj) as Record<string, unknown> | undefined;
   if (typeof source !== "object" || source === null || Array.isArray(source)) throw new MintRecordsError("maker-mints.json has no records");
+  if (v2 && Object.keys(obj).some((k) => k !== "version" && k !== "records")) throw new MintRecordsError("maker-mints.json has unexpected fields");
   const records: Record<string, MintRecord> = {};
   let migrated = !v2;
   for (const [slot, value] of Object.entries(source)) {
-    if (slot === "version") continue;
     const r = value as Record<string, unknown>;
     if (typeof r !== "object" || r === null) throw new MintRecordsError(`${slot}: not a record`);
     if (r["status"] === "minted" || r["status"] === "pending") {
