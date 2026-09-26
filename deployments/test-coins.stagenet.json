@@ -1,0 +1,224 @@
+{
+  "$comment": "Test coins minted by scripts/mint.ts for project 00053's single-wallet stagenet test (label p4-00053). Public data only: every coin went to the funding wallet (recipient coin public key below). Source: out/mints.stagenet.jsonl. Values are in base units (1 token = 10^6).",
+  "network": "stagenet",
+  "label": "p4-00053",
+  "recipient": {
+    "kind": "self (funding wallet)",
+    "shieldedAddress": "mn_shield-addr_stagenet1c634r9jz3tzc49twj0sv8378muj5us52sfefr6g3rl08qd7dxjsajqdpkd32885wjvrjlnwqft3k422vcf03sk0tr9469cum4mrxgnsfmrnns",
+    "coinPublicKey": "c6a35196428ac58a956e93e0c3c7c7df254e428a827291e9111fde7037cd34a1"
+  },
+  "perToken": {
+    "stkA": {
+      "colour": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934",
+      "coins": 3,
+      "total": "300000000",
+      "totalWhole": "300"
+    },
+    "stkB": {
+      "colour": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+      "coins": 4,
+      "total": "1300000000",
+      "totalWhole": "1300"
+    },
+    "stkC": {
+      "colour": "95778c5f7234237d696969032d8dcfe22936c98927e4d46483c56d11d9c9883b",
+      "coins": 1,
+      "total": "1000000000",
+      "totalWhole": "1000"
+    }
+  },
+  "mints": [
+    {
+      "token": "stkA",
+      "contract": "e8551694e54075e139a7910c882e5f9e45418db744414a3d5908e2e95c4c1d67",
+      "amount": "100000000",
+      "wholeTokens": "100",
+      "callNonce": "fb5df1634d353d31825a90269dc6d8e099689bf8be13abaae749ccaae8298a1e",
+      "coin": {
+        "nonce": "fb5df1634d353d31825a90269dc6d8e099689bf8be13abaae749ccaae8298a1e",
+        "colour": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934",
+        "value": "100000000"
+      },
+      "tx": {
+        "txId": "001b99f3ebfaa2fc158e77cca7ef18af2445e2e5da2ac486808353a0b26a0b0bbe",
+        "txHash": "34d93c94f547f217bb65d9b93b77dc0f697fa8ad3a787a3acbe470ca84ad9b49",
+        "blockHeight": 632403,
+        "blockHash": "a4e7cba7238aec3477c402563e8e6dab4245640c14e2a1d6af5b9eb98711b0ed",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265042971428572",
+          "estimatedFees": "265042971428572"
+        }
+      },
+      "at": "2026-09-26T15:08:31.436Z"
+    },
+    {
+      "token": "stkA",
+      "contract": "e8551694e54075e139a7910c882e5f9e45418db744414a3d5908e2e95c4c1d67",
+      "amount": "100000000",
+      "wholeTokens": "100",
+      "callNonce": "d857315ba1fe08072c800ee80faf5a9ce9fb14cb72d1941e4883d12b7e3306a8",
+      "coin": {
+        "nonce": "d857315ba1fe08072c800ee80faf5a9ce9fb14cb72d1941e4883d12b7e3306a8",
+        "colour": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934",
+        "value": "100000000"
+      },
+      "tx": {
+        "txId": "0087bd3ea979c1351aa34807f955ea5b6aeb0b46071ecf072018faad54d9ebad5e",
+        "txHash": "85a66950f66112f51c586ccecf75d89c09c17d60e5a7162634343fd179dd8d8a",
+        "blockHeight": 632406,
+        "blockHash": "72a5bb37f11dd14dbe5241fc81dca875e00d8fe0801aef0a834165a2c959f415",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265157529061042",
+          "estimatedFees": "265157529061042"
+        }
+      },
+      "at": "2026-09-26T15:08:51.156Z"
+    },
+    {
+      "token": "stkA",
+      "contract": "e8551694e54075e139a7910c882e5f9e45418db744414a3d5908e2e95c4c1d67",
+      "amount": "100000000",
+      "wholeTokens": "100",
+      "callNonce": "5c95c8950b06347aedc9fbccefc012f2d642dd023de5c7084457386d6bd5bf44",
+      "coin": {
+        "nonce": "5c95c8950b06347aedc9fbccefc012f2d642dd023de5c7084457386d6bd5bf44",
+        "colour": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934",
+        "value": "100000000"
+      },
+      "tx": {
+        "txId": "00ed63e605461f0d3776cf5d24c3a3e652f8798c69a9a8c692a50986c0dbc20061",
+        "txHash": "057977ab05a3373e5b06564b66b72fa5147ca79526cc5d8e95a2e0f7ef75a16a",
+        "blockHeight": 632410,
+        "blockHash": "5f8dd2979ae5fae68cbd4e366c49336c4761cbea7e596cda77c6b9680dc737e7",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265278057006075",
+          "estimatedFees": "265278057006075"
+        }
+      },
+      "at": "2026-09-26T15:09:15.006Z"
+    },
+    {
+      "token": "stkB",
+      "contract": "9526b72c34309d2deb426fe5155d601437680f53ca305728a1417b4e8c5eb7e0",
+      "amount": "100000000",
+      "wholeTokens": "100",
+      "callNonce": "03cd8ce03338c42448cb251c55aaf033a81e209c80c6c349afe61b75edd3ba1f",
+      "coin": {
+        "nonce": "03cd8ce03338c42448cb251c55aaf033a81e209c80c6c349afe61b75edd3ba1f",
+        "colour": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+        "value": "100000000"
+      },
+      "tx": {
+        "txId": "002296d8ed3a0b3d4ccb362901c5b20990e487faeedce627b3ef797ce220a56838",
+        "txHash": "f4fce58e90c1474f68d3119d5b331650ae9070d6004ef3cd56bba75c9a925bc5",
+        "blockHeight": 632414,
+        "blockHash": "df1c97008fad818d509c4857e4d6aea54fcd5d1add7a8338e067fa1b76d8378e",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265387360673505",
+          "estimatedFees": "265387360673505"
+        }
+      },
+      "at": "2026-09-26T15:09:38.979Z"
+    },
+    {
+      "token": "stkB",
+      "contract": "9526b72c34309d2deb426fe5155d601437680f53ca305728a1417b4e8c5eb7e0",
+      "amount": "100000000",
+      "wholeTokens": "100",
+      "callNonce": "b611560fa87b9d0bb493aee30ef648872c56645a286bd0161886b540ec6b87a5",
+      "coin": {
+        "nonce": "b611560fa87b9d0bb493aee30ef648872c56645a286bd0161886b540ec6b87a5",
+        "colour": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+        "value": "100000000"
+      },
+      "tx": {
+        "txId": "00914a7a8f5ad6094a578e7e2a11be824e94e71326623efb7df5bf8dc2215c5551",
+        "txHash": "fd532a0d880184d8fdae7ca58b57624f2dc41acb5b48cff7a6694bf411fc4869",
+        "blockHeight": 632418,
+        "blockHash": "2b0e095883bccbea71bbc709549fe30ef232ec04f344d4868c2827f3738be824",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265502604889532",
+          "estimatedFees": "265502604889532"
+        }
+      },
+      "at": "2026-09-26T15:10:02.182Z"
+    },
+    {
+      "token": "stkB",
+      "contract": "9526b72c34309d2deb426fe5155d601437680f53ca305728a1417b4e8c5eb7e0",
+      "amount": "100000000",
+      "wholeTokens": "100",
+      "callNonce": "56efd1cef679781103646c95b1102d3ca9f6299227f0a4497af91ebddaf9ac7e",
+      "coin": {
+        "nonce": "56efd1cef679781103646c95b1102d3ca9f6299227f0a4497af91ebddaf9ac7e",
+        "colour": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+        "value": "100000000"
+      },
+      "tx": {
+        "txId": "004b021739ed10f74043f95b8fd86e31d5bfe4be12a90098af127518eaf410283c",
+        "txHash": "befdce0410c05a2828cd94bf173c7c95b1744419d88333a8580163a6e2ab33d5",
+        "blockHeight": 632421,
+        "blockHash": "9e65fc31655e01cd9c5a00136b4b8089f40b110c4ab6736567ffcdf77aa6750f",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265623861463442",
+          "estimatedFees": "265623861463442"
+        }
+      },
+      "at": "2026-09-26T15:10:20.352Z"
+    },
+    {
+      "token": "stkB",
+      "contract": "9526b72c34309d2deb426fe5155d601437680f53ca305728a1417b4e8c5eb7e0",
+      "amount": "1000000000",
+      "wholeTokens": "1000",
+      "callNonce": "f4bb91e5ba0ca72135d92a9b2d7b999aa20a07f08d85e101c5e3e466397b1138",
+      "coin": {
+        "nonce": "f4bb91e5ba0ca72135d92a9b2d7b999aa20a07f08d85e101c5e3e466397b1138",
+        "colour": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7",
+        "value": "1000000000"
+      },
+      "tx": {
+        "txId": "003a96cb03810b40d863287587ae48a698a706093582892992cb14c9395590d395",
+        "txHash": "e3ceb2337d0d3cb9f10237121089dbceee05855bc45b26820c4a3629ee32b2b5",
+        "blockHeight": 632424,
+        "blockHash": "62b5efdc13f140e2da40e7ce658c17643b9c2e482c4639eed9839aad47d8c520",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265806773590718",
+          "estimatedFees": "265806773590718"
+        }
+      },
+      "at": "2026-09-26T15:10:38.096Z"
+    },
+    {
+      "token": "stkC",
+      "contract": "c03b55f7cf508a0c92ff15049fa3c4638e9b585f635a122254332a32556599b8",
+      "amount": "1000000000",
+      "wholeTokens": "1000",
+      "callNonce": "7b69bf96c166dc357a0b3204f503e8b31da4f2c994dddd47fc1f6642a00b9470",
+      "coin": {
+        "nonce": "7b69bf96c166dc357a0b3204f503e8b31da4f2c994dddd47fc1f6642a00b9470",
+        "colour": "95778c5f7234237d696969032d8dcfe22936c98927e4d46483c56d11d9c9883b",
+        "value": "1000000000"
+      },
+      "tx": {
+        "txId": "00f5f1f8594b051665f3f06eca437a4f0c2083862c2fefeb88baf1afda655ae26e",
+        "txHash": "dc04f3123720a41e84301c1d6efe30def9662cb94c0469bb5db7d14bb0ea1c95",
+        "blockHeight": 632427,
+        "blockHash": "ff6931d79754e4b9368d4c2e39c9e6a5e594e51459b91b786f6551b16a5f59b8",
+        "status": "SucceedEntirely",
+        "fees": {
+          "paidFees": "265922851276421",
+          "estimatedFees": "265922851276421"
+        }
+      },
+      "at": "2026-09-26T15:10:56.622Z"
+    }
+  ]
+}
