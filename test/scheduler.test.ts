@@ -647,6 +647,28 @@ describe("audit fixes: persistence, timeouts, version guard", () => {
 });
 
 describe("third audit pass", () => {
+  test("F-B25/F-B26: a process that lost service.lock builds and posts nothing and asks to exit", async () => {
+    const wallet = fundingWallet();
+    const fatal: string[] = [];
+    const clock = new FakeClock();
+    const journal = openJournal({ file: join(dir, "own-lock", "j.json"), networkId: "stagenet", mode: "single-wallet-pinned", now: () => new Date(clock.now()) });
+    const scheduler = new Scheduler({
+      cfg: cfg({ freshStartAck: journal.freshStartToken }),
+      slots: testSlots(() => "funding").slice(0, 2),
+      journal,
+      outbox: new Outbox(join(dir, "own-lock", "outbox")),
+      wallets: new FakeWallets([wallet]),
+      clock,
+      log: () => undefined,
+      ownsLock: () => false,
+      onFatal: (r) => fatal.push(r),
+    });
+    const report = await scheduler.runTick();
+    expect(report.built).toBe(0);
+    expect(wallet.builds).toBe(0);
+    expect(fatal).toEqual(["service.lock was taken over by another process"]);
+  });
+
   test("F-B28: sustained 429s with Retry-After 300 on every kernel call never trip the watchdog", async () => {
     kernel = new MockKernel().start();
     const wallet = fundingWallet();

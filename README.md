@@ -241,17 +241,21 @@ against a real kernel) has not run yet. Do it in stages:
   `docker compose restart proof-server`.
 - **Fresh journal = explicit acknowledgement.** A journal created from nothing (first
   install, or after one was lost) builds and adopts nothing, and `/health` fails, until you
-  start once with `FRESH_START_ACK=true`. Before that, make sure no earlier offer of these
+  start once with `FRESH_START_ACK=<token>`, where the token (`fresh-xxxxxxxx`) is printed in
+  the log and on `/status` for THAT journal. Before that, make sure no earlier offer of these
   wallets can still be live or waiting to be indexed: in kernel mode check the kernel's
   `GET /v1/offers?token=<give colour>` for the makers' coins, or wait out the root window.
+  A stale value (`true`, or an older journal's token) never acknowledges a new journal; remove
+  the variable after the start (the service warns while it is set).
 - **Halted slots** (an offer-id or input-nullifier mismatch) keep their coin claimed and fail
   `/health`; `/status` lists them. After checking the offer in the kernel, stop the service
   and run `slots:unhalt --slot AB-01` (re-verify, claim kept) or `slots:unhalt --slot AB-01
   --retire` (you confirmed the old offer is dead; the coin is freed).
-- **Stale locks**: `service.lock` is never taken over by age. A holder on the same host that
-  is provably gone (PID not running, PID reused, or a restarted container) is replaced
-  automatically; a holder on another host is refused until you confirm it is not running
-  and start once with `BREAK_LOCK=<instance id from the error>`.
+- **Locks**: `service.lock` is held by a 30 s heartbeat. Any lock whose heartbeat is younger
+  than 90 s is refused, whoever holds it (a live `docker compose run` next to the service is
+  refused too); after a crash the next start waits at most about 90 s. If you are certain the
+  holder is not running, `BREAK_LOCK=<instance id from the error>` replaces that one lock at
+  once. A process whose lock was taken over stops before it builds or posts anything.
 - **Root window**: `ROOT_WINDOW_MINUTES` is an upper bound that you set to the network's real
   Merkle-root window. The kernel expires an offer at the root's last-seen time plus that
   window; the service rebuilds on a coin only when the kernel says the offer is expired or

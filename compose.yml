@@ -22,9 +22,8 @@ services:
   ladder:
     build: .
     image: stagenet-offer-ladders:${IMAGE_TAG:-local}
-    # A fixed hostname: after a crash or a recreate, service.lock's holder (same host, PID 1,
-    # another instance id) is recognised as dead and taken over (audit F-A18).
-    hostname: stagenet-offer-ladders
+    # service.lock liveness is its 30 s heartbeat (stale after 90 s), not the host or PID
+    # (audit F-B25): after a crash the restarted container waits at most ~90 s.
     restart: unless-stopped
     mem_limit: ${LADDER_MEM_LIMIT:-4g}
     depends_on:

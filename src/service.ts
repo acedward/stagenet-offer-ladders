@@ -317,6 +317,7 @@ const createServiceLocked = async (config: ServiceConfig, logLine: (line: string
             const actual = await fetchNodeVersion(config.network);
             return actual === config.expectedNodeVersion ? null : `node version ${actual} != pinned ${config.expectedNodeVersion}`;
           },
+    ownsLock: () => serviceLock.held(),
     onFatal: (reason) => {
       logLine(`fatal: ${reason}; exiting so the restart policy recovers`);
       setTimeout(() => process.exit(70), 1_000).unref?.();

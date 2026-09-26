@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { redact } from "../src/redact.ts";
-import { LockHeldError, removeStaleLock, takeServiceLock } from "../src/service-lock.ts";
+import { LockHeldError, takeServiceLock } from "../src/service-lock.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -15,9 +15,15 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe("C4 / F-B13 / F-A18 service lock", () => {
+describe("C4 / F-B25 / F-B26 / F-B27 service lock (heartbeat liveness)", () => {
   const lockFile = () => join(dir, "service.lock");
-  const holder = (h: Record<string, unknown>) => writeFileSync(lockFile(), JSON.stringify({ command: "ladder:run", at: "x", ...h }));
+  const holder = (h: Record<string, unknown>, ageMs = 0) => {
+    writeFileSync(lockFile(), JSON.stringify({ pid: 1, host: "ladder", command: "ladder:run", at: "x", ...h }));
+    if (ageMs > 0) {
+      const t = new Date(Date.now() - ageMs);
+      utimesSync(lockFile(), t, t);
+    }
+  };
 
   test("a second concurrent command is refused; release frees it", () => {
     const first = takeServiceLock(dir, "ladder:run");
@@ -28,55 +34,71 @@ describe("C4 / F-B13 / F-A18 service lock", () => {
     takeServiceLock(dir, "makers:mint").release();
   });
 
-  test("no age-only takeover: an old lock of a LIVE holder on this host is refused", () => {
-    holder({ pid: 4242, host: "here", instance: "i-old" });
-    const old = new Date(Date.now() - 24 * 3_600_000);
-    utimesSync(lockFile(), old, old);
-    expect(() => takeServiceLock(dir, "makers:mint", { host: "here", pid: 1, isAlive: () => true, startTimeOf: () => undefined })).toThrow(LockHeldError);
+  test("F-B25: a LIVE second container (same hostname, PID 1, other instance, fresh heartbeat) is refused", () => {
+    holder({ instance: "i-live" }, 10_000);
+    expect(() => takeServiceLock(dir, "ladder:run", { host: "ladder", pid: 1, instance: "i-second" })).toThrow(/heartbeat is 10 s old/);
   });
 
-  test("dead PID on this host → taken over; PID reused (other start time) → taken over", () => {
-    holder({ pid: 4242, host: "here", instance: "i-dead" });
-    takeServiceLock(dir, "x", { host: "here", pid: 1, isAlive: () => false }).release();
-    holder({ pid: 4242, host: "here", instance: "i-reused", startTime: "100" });
-    takeServiceLock(dir, "x", { host: "here", pid: 1, isAlive: () => true, startTimeOf: (p) => (p === 4242 ? "999" : "5") }).release();
-  });
-
-  test("container restart: same host and PID 1 but another instance id → taken over", () => {
-    holder({ pid: 1, host: "ladder", instance: "i-before-oom" });
-    const lock = takeServiceLock(dir, "ladder:run", { host: "ladder", pid: 1, instance: "i-after", isAlive: () => true });
+  test("a stale heartbeat (older than 3 × interval) is taken over, whatever the host", () => {
+    holder({ instance: "i-dead", host: "elsewhere" }, 120_000);
+    const lock = takeServiceLock(dir, "ladder:run", { host: "ladder", pid: 1, instance: "i-new" });
     expect(lock.held()).toBe(true);
+    expect(existsSync(`${lockFile()}.takeover`)).toBe(false);
     lock.release();
   });
 
-  test("another host cannot be checked: refused, unless BREAK_LOCK names that exact instance", () => {
-    holder({ pid: 1, host: "other-container", instance: "i-remote" });
-    expect(() => takeServiceLock(dir, "x", { host: "here", pid: 1 })).toThrow(/BREAK_LOCK=i-remote/);
-    expect(() => takeServiceLock(dir, "x", { host: "here", pid: 1, breakInstance: "i-wrong" })).toThrow(LockHeldError);
-    takeServiceLock(dir, "x", { host: "here", pid: 1, breakInstance: "i-remote" }).release();
+  test("BREAK_LOCK names one lock and replaces it at once", () => {
+    holder({ instance: "i-remote" }, 1_000);
+    expect(() => takeServiceLock(dir, "x", { breakInstance: "i-other" })).toThrow(LockHeldError);
+    takeServiceLock(dir, "x", { breakInstance: "i-remote" }).release();
   });
 
-  test("paused holder: after a takeover its heartbeat reports the loss and its release does not delete the new lock", async () => {
+  test("F-B26: while another contender holds the takeover file, a takeover is refused and the lock is untouched", () => {
+    holder({ instance: "i-stale" }, 120_000);
+    writeFileSync(`${lockFile()}.takeover`, JSON.stringify({ instance: "i-contender" }));
+    expect(() => takeServiceLock(dir, "x", { instance: "i-me" })).toThrow(/taking it over right now/);
+    expect(JSON.parse(readFileSync(lockFile(), "utf8")).instance).toBe("i-stale");
+  });
+
+  test("F-B26: a takeover never removes a fresh lock (renewed between the check and the takeover)", () => {
+    holder({ instance: "i-stale" }, 120_000);
+    const winner = takeServiceLock(dir, "a", { instance: "i-winner" }); // took the stale lock over
+    // a slower contender that judged the SAME stale lock now tries: it must refuse, not rename
+    expect(() => takeServiceLock(dir, "b", { instance: "i-loser" })).toThrow(LockHeldError);
+    expect(winner.held()).toBe(true);
+    winner.release();
+  });
+
+  test("F-B27: a failed initialisation leaves no lock behind and says so; a partial lock is judged by its age", () => {
+    expect(() =>
+      takeServiceLock(dir, "x", {
+        writeContent: () => {
+          throw new Error("ENOSPC");
+        },
+      }),
+    ).toThrow(/cannot initialise .*ENOSPC/);
+    expect(existsSync(lockFile())).toBe(false);
+    const lock = takeServiceLock(dir, "x");
+    lock.release();
+    writeFileSync(lockFile(), "{"); // an unreadable file (e.g. from an older version)
+    expect(() => takeServiceLock(dir, "x")).toThrow(LockHeldError); // young: refused
+    const t = new Date(Date.now() - 120_000);
+    utimesSync(lockFile(), t, t);
+    takeServiceLock(dir, "x").release(); // old: taken over, restarts are not blocked forever
+  });
+
+  test("paused holder: after a takeover its heartbeat reports the loss and its release keeps the new lock", async () => {
     const lost: string[] = [];
-    const a = takeServiceLock(dir, "ladder:run", { heartbeatMs: 10, onLost: (p) => lost.push(p) });
-    // B takes over (as the operator allowed with BREAK_LOCK while A was paused)
-    const b = takeServiceLock(dir, "ladder:run", { host: "b", pid: 7, breakInstance: a.instance });
-    await Bun.sleep(40);
+    const a = takeServiceLock(dir, "ladder:run", { heartbeatMs: 15, onLost: (p) => lost.push(p) });
+    const t = new Date(Date.now() - 120_000);
+    utimesSync(a.path, t, t); // A paused: no heartbeat for 2 min
+    const b = takeServiceLock(dir, "ladder:run", { staleAfterMs: 60_000 });
+    await Bun.sleep(50);
     expect(lost).toEqual([a.path]);
     expect(a.held()).toBe(false);
     a.release();
-    expect(existsSync(b.path)).toBe(true);
     expect(b.held()).toBe(true);
     b.release();
-  });
-
-  test("two contenders on one stale lock: the second one's stale judgement cannot remove the winner's lock", () => {
-    holder({ pid: 4242, host: "here", instance: "i-stale" });
-    const winner = takeServiceLock(dir, "a", { host: "here", pid: 1, isAlive: () => false });
-    // the loser judged the SAME stale lock earlier and now tries to remove it
-    expect(removeStaleLock(lockFile(), "i-stale", "i-loser")).toBe(false);
-    expect(winner.held()).toBe(true);
-    winner.release();
   });
 });
 

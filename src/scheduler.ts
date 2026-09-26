@@ -165,6 +165,8 @@ export interface SchedulerDeps {
   readonly versionGuard?: (() => Promise<string | null>) | undefined;
   /** Called when the process should exit so its restart policy recovers (audit C6). */
   readonly onFatal?: ((reason: string) => void) | undefined;
+  /** Does this process still hold service.lock? Checked before any build or post (audit F-B25/F-B26). */
+  readonly ownsLock?: (() => boolean) | undefined;
 }
 
 /** Reject after `ms` with a `TimeoutError` (the underlying work cannot be cancelled). */
@@ -602,6 +604,17 @@ export class Scheduler {
     await this.#post(slot, entry, tick, actions, counts);
   }
 
+  /** Stop at once if another process has taken the lock over (a paused holder resuming). */
+  #lockLost(actions: string[]): boolean {
+    if (this.deps.ownsLock === undefined || this.deps.ownsLock()) return false;
+    actions.push("lock-lost");
+    if (!this.#stopping) {
+      this.stop();
+      this.deps.onFatal?.("service.lock was taken over by another process");
+    }
+    return true;
+  }
+
   async #offer(
     record: SlotRecord,
     snap: WalletSnapshot,
@@ -611,6 +624,7 @@ export class Scheduler {
   ): Promise<void> {
     const { cfg, journal, clock, log } = this.deps;
     const slot = record.slot;
+    if (this.#lockLost(actions)) return;
     if (this.#publishBlocked !== undefined) {
       actions.push("publish-blocked");
       return;
@@ -804,6 +818,7 @@ export class Scheduler {
     counts: { posted: number; rejected: number; errors: number; consumed: number },
   ): Promise<void> {
     const { cfg, journal, clock, log, kernel } = this.deps;
+    if (this.#lockLost(actions)) return;
     const outcome = await kernel!.postOffer(entry.blob);
     if (outcome.kind === "accepted") {
       if (outcome.offerId !== undefined && outcome.offerId !== entry.offerId) {

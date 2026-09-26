@@ -1,27 +1,47 @@
 /**
  * One exclusive lock per state directory, taken by every command that opens a maker or
- * funding wallet or writes the journal (`ladder:*`, `makers:*`, `offers:settle`,
+ * funding wallet or writes the journal (`ladder:*`, `makers:*`, `slots:*`, `offers:settle`,
  * `funding:status`). Audit C4: two processes must never run facades on the same seeds or
  * write the same journal.
  *
- * `<STATE_DIR>/service.lock` records PID, host, command, a random per-process INSTANCE id
- * and the process start time. Audits F-B13 / F-A18 (fail closed):
- * - there is NO age-based takeover: a live holder is never displaced, however long it
- *   was paused;
- * - a lock is stale, and taken over, only when its holder is on THIS host and provably
- *   gone: its PID is not running, or the PID now belongs to a different process (another
- *   start time, or our own PID with another instance id, as after a container restart);
- * - a holder on another host cannot be checked: refused, unless the operator names that
- *   exact lock with `BREAK_LOCK=<instance>` after making sure it is not running;
- * - takeover renames the stale file aside and verifies it was the one judged stale, so two
- *   contenders cannot both win or delete each other's fresh lock;
- * - the heartbeat and `release` verify the instance id: a holder that finds its lock
- *   replaced calls `onLost` (default: exit) and never unlinks another instance's lock.
+ * Liveness is the HEARTBEAT, not the host or PID (audits F-B25 / F-A25: PIDs and hostnames
+ * repeat across containers, so they cannot prove a holder dead):
+ * - the holder touches `service.lock` every `heartbeatMs` (30 s);
+ * - a lock whose heartbeat is older than `3 × heartbeatMs` (90 s) is stale; anything younger
+ *   is refused, whoever holds it. A restarted container therefore waits about 90 s;
+ * - `BREAK_LOCK=<instance>` still lets an operator replace one named lock at once.
+ *
+ * Creation is atomic (audit F-B27): the content is written to a private temp file, fsynced,
+ * and `link(2)`ed to `service.lock`, so the lock never exists half-written; a failed
+ * initialisation leaves nothing behind and says so.
+ *
+ * Takeover is serialised (audit F-B26): a contender must first create
+ * `service.lock.takeover` the same atomic way; inside it, it re-checks that the lock is still
+ * the stale one, renames it aside, and creates its own with `link(2)` (which fails, and
+ * refuses, if anyone else created one meanwhile). A fresh lock is never removed. A takeover
+ * file left by a crash is itself stale after 60 s.
+ *
+ * The heartbeat and `release` verify the instance id: a holder whose lock was taken over
+ * calls `onLost` (default: exit 75) and never unlinks another instance's lock; `held()` lets
+ * the scheduler check ownership before it publishes anything.
  *
  * @module
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, utimesSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeSync,
+} from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 
@@ -39,7 +59,7 @@ export interface LockHolder {
   readonly command: string;
   readonly at: string;
   readonly instance?: string;
-  readonly startTime?: string;
+  readonly heartbeatMs?: number;
 }
 
 export class LockHeldError extends Error {
@@ -54,31 +74,11 @@ export class LockHeldError extends Error {
   }
 }
 
-const alive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-};
-
-/** Linux process start time (clock ticks since boot, /proc/<pid>/stat field 22), if readable. */
-export const processStartTime = (pid: number): string | undefined => {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    return fields[19];
-  } catch {
-    return undefined;
-  }
-};
-
 export interface TakeLockOptions {
   readonly heartbeatMs?: number;
-  /** For tests. */
-  readonly isAlive?: (pid: number) => boolean;
-  readonly startTimeOf?: (pid: number) => string | undefined;
+  /** Stale after this long without a heartbeat (default 3 × heartbeatMs). */
+  readonly staleAfterMs?: number;
+  readonly now?: () => number;
   readonly host?: string;
   readonly pid?: number;
   readonly instance?: string;
@@ -86,10 +86,9 @@ export interface TakeLockOptions {
   readonly breakInstance?: string;
   /** Called when the heartbeat finds the lock replaced (default: log and exit 75). */
   readonly onLost?: (path: string) => void;
+  /** For tests: the write of the lock content into its temp file. */
+  readonly writeContent?: (fd: number, data: string) => void;
 }
-
-/** Instances held by THIS process (a second take in the same process is never "stale"). */
-const ownInstances = new Set<string>();
 
 const readHolder = (path: string): LockHolder | undefined => {
   try {
@@ -99,115 +98,132 @@ const readHolder = (path: string): LockHolder | undefined => {
   }
 };
 
-/** Is `holder` provably gone? Only decidable for a holder on this host. */
-export const holderIsGone = (
-  holder: LockHolder,
-  me: { host: string; pid: number; instance: string },
-  isAlive: (pid: number) => boolean,
-  startTimeOf: (pid: number) => string | undefined,
-): boolean => {
-  if (holder.host !== me.host) return false;
-  // Our PID but an instance this process never created: a previous life of the PID (for
-  // example PID 1 before a container restart).
-  if (holder.pid === me.pid) return holder.instance !== me.instance && !ownInstances.has(holder.instance ?? "");
-  if (!isAlive(holder.pid)) return true;
-  const now = startTimeOf(holder.pid);
-  return holder.startTime !== undefined && now !== undefined && now !== holder.startTime; // PID reused
+const ageOf = (path: string, now: number): number | undefined => {
+  try {
+    return now - statSync(path).mtimeMs;
+  } catch {
+    return undefined;
+  }
 };
 
 /**
- * Replace a stale lock atomically: rename it aside, check it is the one judged stale
- * (same instance id), and put it back if not (another contender got there first).
+ * Create `path` atomically with `data`: temp file (O_EXCL, 0600) → write → fsync → link.
+ * Returns false if `path` already exists. Never leaves a partial `path` or a temp file.
  */
-export const removeStaleLock = (path: string, staleInstance: string | undefined, ownInstance: string): boolean => {
-  const aside = `${path}.stale-${ownInstance}`;
+export const createAtomically = (path: string, data: string, write: (fd: number, data: string) => void = (fd, d) => void writeSync(fd, d)): boolean => {
+  const temp = `${path}.init-${randomUUID()}`;
+  let fd: number | undefined;
   try {
-    renameSync(path, aside);
-  } catch {
-    return false; // gone meanwhile: the caller simply retries the exclusive create
-  }
-  const moved = readHolder(aside);
-  if (moved?.instance !== staleInstance) {
+    fd = openSync(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    write(fd, data);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
     try {
-      linkSync(aside, path); // restore the fresh lock we displaced (fails if yet another exists)
-    } catch {
-      /* someone else holds it now; nothing to restore over */
+      linkSync(temp, path);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
     }
-    rmSync(aside, { force: true });
-    return false;
+  } catch (error) {
+    throw new Error(`cannot initialise ${path}: ${(error as Error).message}`);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already failing */
+      }
+    }
+    rmSync(temp, { force: true });
   }
-  rmSync(aside, { force: true });
-  return true;
 };
 
 export const takeServiceLock = (stateDir: string, command: string, options: TakeLockOptions = {}): ServiceLock => {
   mkdirSync(stateDir, { recursive: true });
   const path = join(stateDir, "service.lock");
-  const isAlive = options.isAlive ?? alive;
-  const startTimeOf = options.startTimeOf ?? processStartTime;
+  const mutex = `${path}.takeover`;
+  const heartbeatMs = options.heartbeatMs ?? 30_000;
+  const staleAfterMs = options.staleAfterMs ?? 3 * heartbeatMs;
+  const now = options.now ?? Date.now;
   const me = { host: options.host ?? hostname(), pid: options.pid ?? process.pid, instance: options.instance ?? randomUUID() };
   const breakInstance = options.breakInstance ?? process.env["BREAK_LOCK"]?.trim();
-  for (let attempt = 0; attempt < 3; attempt++) {
-    let fd: number;
-    try {
-      fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const holder = readHolder(path);
-      if (holder === undefined) {
-        if (!existsSync(path)) continue;
-        throw new LockHeldError(path, undefined, "; the lock file is unreadable: remove it by hand once nothing runs");
-      }
-      const gone = holderIsGone(holder, me, isAlive, startTimeOf) || (breakInstance !== undefined && breakInstance !== "" && breakInstance === holder.instance);
-      if (gone && removeStaleLock(path, holder.instance, me.instance)) continue;
+  const content = JSON.stringify({
+    pid: me.pid,
+    host: me.host,
+    command,
+    at: new Date(now()).toISOString(),
+    instance: me.instance,
+    heartbeatMs,
+  } satisfies LockHolder);
+
+  let acquired = createAtomically(path, content, options.writeContent);
+  if (!acquired) {
+    const holder = readHolder(path);
+    const age = ageOf(path, now());
+    const named = breakInstance !== undefined && breakInstance !== "" && holder?.instance === breakInstance;
+    const stale = age !== undefined && age > staleAfterMs;
+    if (age !== undefined && !stale && !named) {
       throw new LockHeldError(
         path,
         holder,
-        holder.host !== me.host ? `; it is on another host and cannot be checked: if it is not running, set BREAK_LOCK=${holder.instance ?? "<instance>"} once` : "",
+        `; its heartbeat is ${Math.round(age / 1000)} s old (stale after ${Math.round(staleAfterMs / 1000)} s)` +
+          (holder?.instance ? `; if it is certainly not running, BREAK_LOCK=${holder.instance} replaces it now` : ""),
       );
     }
-    const content: LockHolder = {
-      pid: me.pid,
-      host: me.host,
-      command,
-      at: new Date().toISOString(),
-      instance: me.instance,
-      ...(startTimeOf(me.pid) !== undefined ? { startTime: startTimeOf(me.pid)! } : {}),
-    };
-    writeSync(fd, JSON.stringify(content));
-    closeSync(fd);
-    ownInstances.add(me.instance);
-    const held = (): boolean => readHolder(path)?.instance === me.instance;
-    const onLost =
-      options.onLost ??
-      ((p: string) => {
-        console.error(`[${new Date().toISOString()}] fatal: ${p} was taken over by another process; exiting`);
-        process.exit(75);
-      });
-    const heartbeat = setInterval(() => {
-      if (!held()) {
-        clearInterval(heartbeat);
-        onLost(path);
-        return;
+    // Takeover, serialised by the takeover file.
+    if (!createAtomically(mutex, content)) {
+      const mutexAge = ageOf(mutex, now());
+      if (mutexAge !== undefined && mutexAge > 60_000) rmSync(mutex, { force: true }); // left by a crash
+      throw new LockHeldError(path, holder, "; another process is taking it over right now, try again");
+    }
+    try {
+      const again = readHolder(path);
+      const againAge = ageOf(path, now());
+      const stillStale =
+        againAge === undefined || (again?.instance === holder?.instance && (againAge > staleAfterMs || named));
+      if (!stillStale) throw new LockHeldError(path, again, "; it was renewed meanwhile");
+      if (againAge !== undefined) {
+        const aside = `${path}.stale-${me.instance}`;
+        renameSync(path, aside);
+        rmSync(aside, { force: true });
       }
-      try {
-        const t = new Date();
-        utimesSync(path, t, t);
-      } catch {
-        /* released */
-      }
-    }, options.heartbeatMs ?? 30_000);
-    heartbeat.unref?.();
-    let released = false;
-    const release = (): void => {
-      if (released) return;
-      released = true;
-      clearInterval(heartbeat);
-      ownInstances.delete(me.instance);
-      if (held()) rmSync(path, { force: true }); // never unlink another instance's lock
-    };
-    process.on("exit", release);
-    return { path, instance: me.instance, held, release };
+      acquired = createAtomically(path, content, options.writeContent);
+      if (!acquired) throw new LockHeldError(path, readHolder(path), "; another process took it first");
+    } finally {
+      if (readHolder(mutex)?.instance === me.instance) rmSync(mutex, { force: true });
+    }
   }
-  throw new LockHeldError(path, readHolder(path));
+
+  const held = (): boolean => readHolder(path)?.instance === me.instance;
+  const onLost =
+    options.onLost ??
+    ((p: string) => {
+      console.error(`[${new Date().toISOString()}] fatal: ${p} was taken over by another process; exiting`);
+      process.exit(75);
+    });
+  const heartbeat = setInterval(() => {
+    if (!held()) {
+      clearInterval(heartbeat);
+      onLost(path);
+      return;
+    }
+    try {
+      const t = new Date();
+      utimesSync(path, t, t);
+    } catch {
+      /* released */
+    }
+  }, heartbeatMs);
+  heartbeat.unref?.();
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    clearInterval(heartbeat);
+    if (held()) rmSync(path, { force: true }); // never unlink another instance's lock
+  };
+  process.on("exit", release);
+  return { path, instance: me.instance, held, release };
 };
