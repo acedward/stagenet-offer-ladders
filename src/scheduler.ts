@@ -815,13 +815,23 @@ export class Scheduler {
         const failures = (journal.get(slot)?.consecutiveFailures ?? 0) + 1;
         journal.endOffer(slot, "rejected", {
           code: outcome.code,
-          message: redact(`${outcome.status} ${outcome.refusal}: ${outcome.reason}`),
+          message: redact(`${outcome.status} ${outcome.refusal}: ${outcome.reason}${outcome.activeOfferId ? ` (active offer ${outcome.activeOfferId})` : ""}`),
           retryAt: new Date(clock.now() + retryDelayMs(cfg, failures)),
         });
         counts.rejected += 1;
         actions.push(`rejected:${outcome.refusal}:${outcome.code}`);
       }
-      log({ phase: "post", tick, slot, offerId: short(entry.offerId), result: "rejected", status: outcome.status, code: outcome.code, refusal: outcome.refusal });
+      log({
+        phase: "post",
+        tick,
+        slot,
+        offerId: short(entry.offerId),
+        result: "rejected",
+        status: outcome.status,
+        code: outcome.code,
+        refusal: outcome.refusal,
+        activeOfferId: outcome.activeOfferId ? short(outcome.activeOfferId) : undefined,
+      });
       return;
     }
     // unavailable: keep the claim; the next tick re-posts the same blob.

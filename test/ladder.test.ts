@@ -135,3 +135,13 @@ describe("F-B22 deploy arguments", () => {
     expect(() => parseDeployArgs(["--forse"])).toThrow(/unknown flag/);
   });
 });
+
+describe("C11 validateColours", () => {
+  test("native, shared or equal colours are refused", async () => {
+    const { validateColours, NATIVE_COLOUR } = await import("../src/ladder.ts");
+    const file = parseLadderFile(base);
+    expect(() => validateColours(file, { stkA: COLOUR_A, stkB: COLOUR_B, stkC: COLOUR_C })).not.toThrow();
+    expect(() => validateColours(file, { stkA: NATIVE_COLOUR, stkB: COLOUR_B, stkC: COLOUR_C })).toThrow(/native/);
+    expect(() => validateColours(file, { stkA: COLOUR_B, stkB: COLOUR_B, stkC: COLOUR_C })).toThrow(/same colour/);
+  });
+});

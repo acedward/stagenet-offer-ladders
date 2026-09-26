@@ -178,8 +178,15 @@ export async function buildPinnedOffer(wallet: OfferWallet, args: BuildOfferArgs
     await wallet.revert(recipe).catch(() => undefined);
     throw error;
   }
-  const raw = finalized.serialize();
-  const blob = OfferFiles.encode(raw);
+  let raw: Uint8Array;
+  let blob: string;
+  try {
+    raw = finalized.serialize();
+    blob = OfferFiles.encode(raw);
+  } catch (error) {
+    await wallet.revert(recipe).catch(() => undefined); // audit C3 verification: no leaked reservation
+    throw error;
+  }
   return {
     recipe,
     blob,

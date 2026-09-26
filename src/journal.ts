@@ -164,8 +164,11 @@ export function fsyncDirectory(directory: string): void {
   try {
     fd = openSync(directory, "r");
     fsyncSync(fd);
-  } catch {
-    /* not supported on every filesystem */
+  } catch (error) {
+    // Only "this filesystem cannot fsync a directory" is tolerated; a real I/O error
+    // fails the write (audit C3 verification).
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EISDIR" && code !== "EPERM" && code !== "EBADF") throw error;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }

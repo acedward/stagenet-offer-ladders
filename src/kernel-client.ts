@@ -65,7 +65,16 @@ export function classifyPost(status: number, body: unknown): PostDisposition {
 
 export type PostOutcome =
   | { readonly kind: "accepted"; readonly status: number; readonly offerId?: string; readonly duplicate: boolean; readonly attempts: number }
-  | { readonly kind: "rejected"; readonly status: number; readonly code: string; readonly refusal: RefusalKind; readonly reason: string; readonly attempts: number }
+  | {
+      readonly kind: "rejected";
+      readonly status: number;
+      readonly code: string;
+      readonly refusal: RefusalKind;
+      readonly reason: string;
+      readonly attempts: number;
+      /** `409 DUPLICATE_MARKERS`: the live offer that already claims the marker (audit F-B10). */
+      readonly activeOfferId?: string;
+    }
   | { readonly kind: "unavailable"; readonly status?: number; readonly code?: string; readonly error: string; readonly attempts: number };
 
 /** Kernel offer status vocabulary (`not_found` included). */
@@ -231,7 +240,16 @@ export class KernelClient {
       }
       if (disposition === "rejected") {
         const reason = JSON.stringify(answer.body ?? null).slice(0, 400);
-        return { kind: "rejected", status: answer.status, code, refusal: refusalKind(answer.status, code), reason, attempts };
+        const active = (answer.body as { activeOfferId?: unknown } | null)?.activeOfferId;
+        return {
+          kind: "rejected",
+          status: answer.status,
+          code,
+          refusal: refusalKind(answer.status, code),
+          reason,
+          attempts,
+          ...(typeof active === "string" ? { activeOfferId: active.toLowerCase() } : {}),
+        };
       }
       if (disposition === "retry-same") {
         sameBlobRetries += 1;

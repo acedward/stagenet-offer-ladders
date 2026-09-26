@@ -92,6 +92,7 @@ describe("POST /v1/offers against the mock kernel", () => {
     await client.postOffer(blobOf(4, ["coin-4"], ["shared-output"]));
     const conflict = await client.postOffer(blobOf(5, ["coin-5"], ["shared-output"]));
     expect(conflict).toMatchObject({ kind: "rejected", status: 409, code: "DUPLICATE_MARKERS", refusal: "CONFLICT", attempts: 1 });
+    expect(conflict.kind === "rejected" && conflict.activeOfferId).toMatch(/^[0-9a-f]{64}$/); // F-B10: conflict identity kept
     expect(kernel.posts).toHaveLength(2);
     expect(sleeps).toEqual([]);
   });
