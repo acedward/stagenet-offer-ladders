@@ -15,6 +15,9 @@
  *
  * Skips `.git/` and `node_modules/`, and the secrets files themselves; binary files are
  * skipped; text files up to 50 MB are read.
+ *
+ * Git history (audit C15): the pre-push gate writes `git log -p --all` to
+ * `out/git-history.patch` (git-ignored) so every committed version is scanned too.
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, relative } from "node:path";
