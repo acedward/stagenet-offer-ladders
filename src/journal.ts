@@ -118,6 +118,12 @@ export interface JournalData {
   mode: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Audit F-B15: set when this journal was created from nothing. Until an operator
+   * acknowledges it (FRESH_START_ACK=true, after checking that no earlier offer of these
+   * wallets can still be live), the service builds and adopts nothing.
+   */
+  freshStart?: boolean;
   slots: Record<string, SlotRecord>;
 }
 
@@ -275,6 +281,19 @@ export class Journal {
     return this.#data.mode;
   }
 
+  /** True while a freshly created journal has not been acknowledged by an operator. */
+  get needsFreshStartAck(): boolean {
+    return this.#data.freshStart === true;
+  }
+
+  acknowledgeFreshStart(): void {
+    if (!this.needsFreshStartAck) return;
+    this.#mutate((data) => {
+      delete data.freshStart;
+      return undefined;
+    });
+  }
+
   toJSON(): JournalData {
     return structuredClone(this.#data);
   }
@@ -394,10 +413,13 @@ export class Journal {
     return this.#mutate((data) => this.#claim(data, slot, ref, "stored"));
   }
 
-  /** Adopt an offer the kernel already holds for this slot's coin (audit C1): `live`. */
+  /**
+   * Adopt an offer the kernel already holds for this slot's coin (audit C1). It enters
+   * `submitted`, so the first-live nullifier verification runs on it too (audit F-B21).
+   */
   adoptOffer(slot: string, ref: Omit<OfferRef, "postedAt" | "outcome" | "endedAt" | "code">): SlotRecord {
     return this.#mutate((data) => {
-      const record = this.#claim(data, slot, ref, "live");
+      const record = this.#claim(data, slot, ref, "submitted");
       record.current!.postedAt = this.#iso();
       record.current!.code = "ADOPTED";
       record.consecutiveFailures = 0;
@@ -590,7 +612,7 @@ export function openJournal(options: OpenJournalOptions): Journal {
   }
   const fresh = (): Journal => {
     const at = now().toISOString();
-    const journal = Journal._create(file, { version: JOURNAL_VERSION, networkId, mode, createdAt: at, updatedAt: at, slots: {} }, now, write);
+    const journal = Journal._create(file, { version: JOURNAL_VERSION, networkId, mode, createdAt: at, updatedAt: at, freshStart: true, slots: {} }, now, write);
     journal.flush();
     return journal;
   };
@@ -605,16 +627,20 @@ export function openJournal(options: OpenJournalOptions): Journal {
   }
   if (problem === null) problem = validationFailure(parsed);
   if (problem !== null) {
-    const movedAside = moveAside(file, "corrupt", now());
-    if (!reset) {
-      writeAtomic(marker, `${JSON.stringify({ reason: problem, movedAside, at: now().toISOString() })}\n`);
-      throw new JournalError(
-        "CORRUPT",
-        `journal ${file} is unusable (${problem}); moved to ${movedAside} and quarantined. Restore it, or reconcile and start with JOURNAL_RESET=true.`,
-        movedAside,
-      );
+    if (reset) {
+      moveAside(file, "corrupt", now());
+      return fresh();
     }
-    return fresh();
+    // Audit F-B18: establish the refusal durably FIRST; only then move the evidence. A
+    // failure or crash in between leaves the corrupt file (or the marker) in place, and
+    // every later start still refuses.
+    write(marker, `${JSON.stringify({ reason: problem, at: now().toISOString() })}\n`);
+    const movedAside = moveAside(file, "corrupt", now());
+    throw new JournalError(
+      "CORRUPT",
+      `journal ${file} is unusable (${problem}); moved to ${movedAside} and quarantined. Restore it, or reconcile and start with JOURNAL_RESET=true.`,
+      movedAside,
+    );
   }
   const data = parsed as JournalData;
   const mismatch =

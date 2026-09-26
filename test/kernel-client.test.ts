@@ -161,3 +161,38 @@ describe("status reads", () => {
     await expect(dead.offerStatus(offerId)).rejects.toThrow(/unavailable/);
   });
 });
+
+describe("F-B15: the live-offer list fails closed", () => {
+  const serve = (handler: (url: URL) => Response) => Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (r) => handler(new URL(r.url)) });
+
+  test("a malformed body throws instead of reading as an empty book", async () => {
+    for (const body of [{}, { offers: "x", nextCursor: null }, { offers: [{ offerId: "abc" }], nextCursor: null }, { offers: [] }]) {
+      const server = serve(() => Response.json(body));
+      const c = new KernelClient({ baseUrl: `http://127.0.0.1:${server.port}`, sleep: async () => undefined });
+      await expect(c.liveOffers(["a".repeat(64)])).rejects.toThrow(/malformed/);
+      await server.stop(true);
+    }
+  });
+
+  test("pagination that never ends throws instead of returning a partial book", async () => {
+    let n = 0;
+    const server = serve(() => {
+      n += 1;
+      return Response.json({ offers: [], nextCursor: `${n}`.padStart(64, "0") });
+    });
+    const c = new KernelClient({ baseUrl: `http://127.0.0.1:${server.port}`, sleep: async () => undefined });
+    await expect(c.liveOffers(["a".repeat(64)], 5)).rejects.toThrow(/partial book/);
+    expect(n).toBe(5);
+    await server.stop(true);
+  });
+
+  test("a well-formed multi-page book is read completely", async () => {
+    const offer = (i: number) => ({ offerId: String(i).padStart(64, "0"), computed: { inputNullifiers: [String(i).padStart(64, "f")], status: "live" } });
+    const server = serve((url) =>
+      url.searchParams.get("after_hash") ? Response.json({ offers: [offer(2)], nextCursor: null }) : Response.json({ offers: [offer(1)], nextCursor: "c".repeat(64) }),
+    );
+    const c = new KernelClient({ baseUrl: `http://127.0.0.1:${server.port}`, sleep: async () => undefined });
+    expect((await c.liveOffers(["a".repeat(64)])).map((o) => o.offerId)).toEqual([offer(1).offerId, offer(2).offerId]);
+    await server.stop(true);
+  });
+});

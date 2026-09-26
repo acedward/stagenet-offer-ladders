@@ -172,6 +172,28 @@ describe("audit C2/C3", () => {
     expect(() => open(file)).not.toThrow();
   });
 
+  test("F-B18: a failure while writing the quarantine marker leaves the corrupt journal in place: still refused", () => {
+    const file = join(dir, "state", "j.json");
+    open(file).ensureSlot(def("AB-01"));
+    writeFileSync(file, "{ torn");
+    const failing = (f: string, c: string) => {
+      if (f.endsWith(".quarantine")) throw new Error("ENOSPC");
+      writeFileSync(f, c);
+    };
+    expect(() => openJournal({ file, networkId: "stagenet", mode: "wallet-per-slot", write: failing })).toThrow(/ENOSPC/);
+    expect(readFileSync(file, "utf8")).toBe("{ torn"); // evidence not moved
+    expect(() => open(file)).toThrow(/quarantined|unusable/);
+    expect(() => open(file)).toThrow(/quarantined/);
+  });
+
+  test("F-B15: a freshly created journal needs an operator acknowledgement; an existing one does not", () => {
+    const file = join(dir, "state", "j.json");
+    const j = open(file);
+    expect(j.needsFreshStartAck).toBe(true);
+    j.acknowledgeFreshStart();
+    expect(open(file).needsFreshStartAck).toBe(false);
+  });
+
   test("C3: a failed write leaves memory unchanged (candidate → persist → commit)", () => {
     let fail = false;
     const file = join(dir, "state", "j.json");

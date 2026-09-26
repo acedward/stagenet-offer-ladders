@@ -170,13 +170,17 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
       submitConfirmMs: num("SUBMIT_CONFIRM_SECONDS", 300, 1) * 1000,
       buildTimeoutMs: num("BUILD_TIMEOUT_SECONDS", 300, 1) * 1000,
       versionCheckEveryTicks: num("VERSION_CHECK_EVERY_TICKS", 10),
+      freshStartAck: env("FRESH_START_ACK") === "true",
     },
     reconcileMs: num("RECONCILE_SECONDS", 60, 1) * 1000,
     stateDir,
     expectedNodeVersion: process.env["EXPECTED_NODE_VERSION"] ?? "2.0.0-d9729c13",
-    watchdogMs:
-      num("WATCHDOG_SECONDS", 0) * 1000 ||
-      Math.max(10 * 60_000, 3 * num("RECONCILE_SECONDS", 60, 1) * 1000 + 2 * num("BUILD_TIMEOUT_SECONDS", 300, 1) * 1000),
+    // Audit F-B16: never shorter than the initial wallet-sync deadline (20 min) plus a margin.
+    watchdogMs: Math.max(
+      30 * 60_000,
+      num("WATCHDOG_SECONDS", 0) * 1000,
+      3 * num("RECONCILE_SECONDS", 60, 1) * 1000 + 2 * num("BUILD_TIMEOUT_SECONDS", 300, 1) * 1000,
+    ),
     zswapApi,
     journalFile: env("JOURNAL_FILE") ?? join(stateDir, `ladder.${mode}.journal.json`),
     outboxDir: env("OUTBOX_DIR") ?? join(stateDir, "outbox"),

@@ -86,7 +86,7 @@ export interface KernelPort {
   /** The `swapoffer1…` string of an offer the kernel holds, if any. */
   offerBlob(offerId: string): Promise<string | undefined>;
   /** The kernel's `computed.inputNullifiers` for an offer, if it can be read. */
-  offerNullifiers?(offerId: string): Promise<string[] | undefined>;
+  offerNullifiers(offerId: string): Promise<string[] | undefined>;
 }
 
 export interface Clock {
@@ -143,6 +143,8 @@ export interface SchedulerConfig {
   readonly buildTimeoutMs: number;
   /** Check the node version every N ticks (0 = only the first tick). */
   readonly versionCheckEveryTicks: number;
+  /** Operator acknowledged a freshly created journal (FRESH_START_ACK=true; audit F-B15). */
+  readonly freshStartAck: boolean;
 }
 
 export interface SlotPlan extends SlotDefinition {
@@ -280,6 +282,7 @@ export class Scheduler {
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
+    if (deps.journal.needsFreshStartAck && deps.cfg.freshStartAck) deps.journal.acknowledgeFreshStart();
     for (const slot of deps.slots) deps.journal.ensureSlot(slot);
   }
 
@@ -339,13 +342,18 @@ export class Scheduler {
     };
 
     // Audit C12: the node/ledger version guard. On a mismatch nothing is built or posted.
-    if (this.deps.versionGuard && (tick === 1 || (cfg.versionCheckEveryTicks > 0 && tick % cfg.versionCheckEveryTicks === 0))) {
+    if (
+      this.deps.versionGuard &&
+      (tick === 1 || this.#haltReason !== undefined || (cfg.versionCheckEveryTicks > 0 && tick % cfg.versionCheckEveryTicks === 0))
+    ) {
       try {
         const problem = await this.deps.versionGuard();
         if (problem !== this.#haltReason) log({ phase: "version", tick, result: problem === null ? "ok" : "halt", detail: problem ?? undefined });
         this.#haltReason = problem ?? undefined;
       } catch (error) {
-        log({ phase: "version", tick, result: "unreadable", detail: message(error) });
+        // Audit F-B24: an unverifiable version is a barrier too, until a check succeeds.
+        this.#haltReason = `node version unverified: ${redact(message(error))}`;
+        log({ phase: "version", tick, result: "unreadable", detail: redact(message(error)) });
       }
     }
     // Audit C1: in kernel mode, learn which coins the kernel already has live offers for,
@@ -382,7 +390,9 @@ export class Scheduler {
         }
         if (REOFFER_STATES.includes(record.state)) {
           const due = record.nextAttemptAt === undefined || clock.now() >= Date.parse(record.nextAttemptAt);
-          if (!due) {
+          if (journal.needsFreshStartAck) {
+            actions.push("fresh-journal-unacknowledged"); // audit F-B15: fail closed
+          } else if (!due) {
             actions.push("backoff");
           } else if (counts.built >= cfg.maxBuildsPerTick) {
             actions.push("deferred");
@@ -511,9 +521,14 @@ export class Scheduler {
     if (status === "live") {
       if (record.state !== "live") {
         // The kernel's own view of what the offer spends must be exactly our pinned coin
-        // (the upstream poster's post-live check; audit C7/B7).
-        const seen = await kernel.offerNullifiers?.(current.offerId).catch(() => undefined);
-        if (seen !== undefined && (seen.length !== 1 || seen[0]!.toLowerCase() !== current.coinNullifier)) {
+        // (the upstream poster's post-live check; audit C7/B7). Unreadable → stay pending
+        // and check again next tick (audit F-B21).
+        const seen = await kernel.offerNullifiers(current.offerId).catch(() => undefined);
+        if (seen === undefined) {
+          actions.push("verify-pending");
+          return;
+        }
+        if (seen.length !== 1 || seen[0]!.toLowerCase() !== current.coinNullifier) {
           journal.halt(slot, "INPUT_NULLIFIER_MISMATCH", `kernel reports inputs [${seen.join(", ")}] for ${current.offerId}`);
           counts.errors += 1;
           actions.push("halted:INPUT_NULLIFIER_MISMATCH");
@@ -524,7 +539,12 @@ export class Scheduler {
       }
       return;
     }
-    // not_found / unknown
+    if (status === "unknown") {
+      // Audit root-expiry premise: an ambiguous status never frees the coin.
+      actions.push("status-unknown");
+      return;
+    }
+    // not_found: the kernel does not list the offer.
     if (dead) {
       journal.endOffer(slot, "expired", { code: "NOT_FOUND_AFTER_EXPIRY" });
       counts.expired += 1;
@@ -548,6 +568,18 @@ export class Scheduler {
     }
     if (this.#publishBlocked !== undefined) {
       actions.push("publish-blocked");
+      return;
+    }
+    // Audit F-B14: before (re-)publishing, the kernel's live input claims must not show a
+    // DIFFERENT offer on this coin; an unreadable list keeps the offer unpublished.
+    if (!(this.#kernelLive instanceof Map)) {
+      actions.push("kernel-live-unknown");
+      return;
+    }
+    const other = this.#kernelLive.get(current.coinNullifier);
+    if (other !== undefined && other.offerId !== current.offerId) {
+      actions.push("coin-held-by-other-offer");
+      log({ phase: "reconcile", tick, slot, offerId: short(current.offerId), result: "held_by_other", other: short(other.offerId) });
       return;
     }
     actions.push(record.state === "stored" ? "publish" : "re-post");
@@ -669,15 +701,21 @@ export class Scheduler {
           : error instanceof Error && error.name === "TimeoutError"
             ? "BUILD_TIMEOUT"
             : "BUILD_FAILED";
-      journal.markError(slot, code, redact(message(error)), new Date(clock.now() + retryDelayMs(cfg, failures)));
+      if (code === "BUILD_TIMEOUT") {
+        // A hung proof cannot be cancelled and keeps the wallet's pin armed: exit so the
+        // restart policy recovers (audit C6). Signalled BEFORE any persist that could throw
+        // (audit F-B16).
+        this.stop();
+        this.deps.onFatal?.(`offer build for ${slot} timed out after ${cfg.buildTimeoutMs} ms`);
+      }
       counts.errors += 1;
       actions.push(`error:${code}`);
       log({ phase: "build", tick, slot, nonce: short(coin.nonce), result: "error", code, detail: redact(message(error)) });
-      if (code === "BUILD_TIMEOUT") {
-        // A hung proof cannot be cancelled and keeps the wallet's pin armed: exit so the
-        // restart policy recovers (audit C6).
-        this.stop();
-        this.deps.onFatal?.(`offer build for ${slot} timed out after ${cfg.buildTimeoutMs} ms`);
+      try {
+        journal.markError(slot, code, redact(message(error)), new Date(clock.now() + retryDelayMs(cfg, failures)));
+      } catch (persistError) {
+        this.#publishBlocked = message(persistError);
+        log({ phase: "persist", tick, slot, result: "error", detail: redact(message(persistError)) });
       }
       return;
     }

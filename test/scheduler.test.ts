@@ -41,6 +41,7 @@ const cfg = (extra: Partial<SchedulerConfig> = {}): SchedulerConfig => ({
   submitConfirmMs: 5 * 60_000,
   buildTimeoutMs: 60_000,
   versionCheckEveryTicks: 0,
+  freshStartAck: true,
   ...extra,
 });
 
@@ -362,9 +363,12 @@ describe("kernel mode against the mock kernel (API.md dedup: output markers only
     expect(kernel.offers.size).toBe(6);
     expect([...kernel.liveByNullifier().values()].every((n) => n === 1)).toBe(true);
     for (const record of second.scheduler.deps.journal.slots()) {
-      expect(record.state).toBe("live");
+      expect(record.state).toBe("submitted"); // adopted offers are verified like our own (F-B21)
       expect(record.current!.coinNonce).toBe(byCoin.get(record.slot)!); // each slot adopts its own offer (legs match)
     }
+    await second.scheduler.runTick();
+    expect(second.scheduler.deps.journal.slots().every((r) => r.state === "live")).toBe(true);
+    expect([...kernel.liveByNullifier().values()].every((n) => n === 1)).toBe(true);
   });
 
   test("C1: without the kernel's live list, nothing new is built (cannot prove the coin is free)", async () => {
@@ -629,6 +633,133 @@ describe("audit fixes: persistence, timeouts, version guard", () => {
     };
     expect(scheduler.deps.journal.slots().every((r) => r.state === "error")).toBe(true);
     expect(isHealthy(source, 600_000)).toBe(false);
+  });
+});
+
+describe("second audit pass (verification findings)", () => {
+  test("F-B15: a fresh journal without FRESH_START_ACK builds and adopts nothing, and /health fails", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel), config: { freshStartAck: false } });
+    const report = await scheduler.runTick();
+    expect(report).toMatchObject({ built: 0, adopted: 0, posted: 0 });
+    expect(report.slots.every((r) => r.actions.includes("fresh-journal-unacknowledged"))).toBe(true);
+    expect(kernel.posts).toHaveLength(0);
+    const source = { journal: scheduler.deps.journal, startedAt: clock.now(), delivery: "kernel" as const, mode: "m", lastTickEndedAt: () => clock.now(), inventory: () => undefined, now: () => clock.now() };
+    expect(isHealthy(source, 600_000)).toBe(false);
+  });
+
+  test("F-B15: delayed indexing — an accepted but not yet listed offer + a lost journal: nothing is built without the operator's ack", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const first = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
+    await first.scheduler.runTick();
+    for (const offer of kernel.offers.values()) offer.status = "unknown" as never; // accepted, not indexed as live yet
+    const second = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel), clock: first.clock, journalFile: join(dir, "lost", "journal.json"), config: { freshStartAck: false } });
+    expect(await second.scheduler.runTick()).toMatchObject({ built: 0, posted: 0 });
+    expect(kernel.offers.size).toBe(1);
+  });
+
+  test("F-B14: switching to kernel mode does not publish a stored offer whose coin a DIFFERENT live offer already spends", async () => {
+    const wallet = fundingWallet();
+    const first = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2) });
+    await first.scheduler.runTick();
+    const ab01 = first.scheduler.deps.journal.get("AB-01")!.current!;
+    kernel = new MockKernel().start();
+    kernel.offers.set("d".repeat(64), { offerId: "d".repeat(64), blob: "x", nullifiers: [ab01.coinNullifier], outputs: [], give: COLOUR_A, giveAmount: GIVE.toString(), want: COLOUR_B, wantAmount: "80000000", status: "live", postedAt: 0 });
+    const second = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel), clock: first.clock, journalFile: first.journalFile });
+    const report = await second.scheduler.runTick();
+    expect(report.slots[0]!.actions).toContain("coin-held-by-other-offer");
+    expect(second.scheduler.deps.journal.get("AB-01")!.state).toBe("stored"); // claim kept, not published
+    expect(second.scheduler.deps.journal.get("AB-02")!.state).toBe("submitted");
+    expect(kernel.liveByNullifier().get(ab01.coinNullifier)).toBe(1);
+  });
+
+  test("F-B21: an unreadable first-live check stays pending; a later wrong read halts", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const client = clientFor(kernel);
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: client });
+    await scheduler.runTick();
+    const original = client.offerNullifiers.bind(client);
+    client.offerNullifiers = async () => undefined;
+    clock.advance(60_000);
+    const pending = await scheduler.runTick();
+    expect(pending.slots[0]!.actions).toContain("verify-pending");
+    expect(scheduler.deps.journal.get("AB-01")!.state).toBe("submitted");
+    client.offerNullifiers = async () => ["ee".repeat(32)];
+    clock.advance(60_000);
+    await scheduler.runTick();
+    expect(scheduler.deps.journal.get("AB-01")!.state).toBe("halted");
+    client.offerNullifiers = original;
+  });
+
+  test("F-B19: a halted slot fails /health and shows on /status", async () => {
+    kernel = new MockKernel().start();
+    kernel.script.push({ status: 200, body: { success: true, offerId: "f".repeat(64) } });
+    const wallet = fundingWallet();
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel) });
+    await scheduler.runTick();
+    expect(scheduler.deps.journal.get("AB-01")!.state).toBe("halted");
+    const source = { journal: scheduler.deps.journal, startedAt: clock.now(), delivery: "kernel" as const, mode: "m", lastTickEndedAt: () => clock.now(), inventory: () => undefined, now: () => clock.now() };
+    expect(isHealthy(source, 600_000)).toBe(false);
+    const server = startStatusServer(source, { port: 0, hostname: "127.0.0.1", staleAfterMs: 600_000 });
+    try {
+      const status = (await (await fetch(`http://127.0.0.1:${server.port}/status`)).json()) as { haltedSlots: { slot: string; code: string }[] };
+      expect(status.haltedSlots).toEqual([{ slot: "AB-01", code: "OFFER_ID_MISMATCH" }]);
+      expect((await fetch(`http://127.0.0.1:${server.port}/health`)).status).toBe(503);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("F-B24: a failing first version check is a barrier until a check succeeds", async () => {
+    const wallet = fundingWallet();
+    let fail = true;
+    const { scheduler } = rig({
+      wallets: [wallet],
+      slots: testSlots(() => "funding").slice(0, 1),
+      versionGuard: async () => {
+        if (fail) throw new Error("fetch failed");
+        return null;
+      },
+      config: { versionCheckEveryTicks: 10 },
+    });
+    const first = await scheduler.runTick();
+    expect(first.built).toBe(0);
+    expect(first.halted).toMatch(/unverified/);
+    fail = false;
+    const second = await scheduler.runTick(); // re-checked while halted, although not a 10th tick
+    expect(second.built).toBe(1);
+    expect(scheduler.haltReason).toBeUndefined();
+  });
+
+  test("F-B16: a build timeout signals fatal even when the journal write then fails", async () => {
+    const wallet = fundingWallet();
+    wallet.build = () => new Promise(() => undefined);
+    let failWrites = false;
+    const write = (file: string, contents: string) => {
+      if (failWrites) throw new Error("EIO");
+      writeAtomic(file, contents);
+    };
+    const fatal: string[] = [];
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), config: { buildTimeoutMs: 20 }, onFatal: (r) => fatal.push(r), write });
+    failWrites = true;
+    await scheduler.runTick();
+    expect(fatal).toHaveLength(1);
+  });
+
+  test("root-expiry premise: an UNKNOWN kernel status never frees the coin, even past the root window", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
+    await scheduler.runTick();
+    const current = scheduler.deps.journal.get("AB-01")!.current!;
+    kernel.offers.get(current.offerId)!.status = "weird" as never; // maps to unknown
+    clock.advance(3 * HOUR);
+    const report = await scheduler.runTick();
+    expect(report).toMatchObject({ built: 0, expired: 0 });
+    expect(report.slots[0]!.actions).toContain("status-unknown");
   });
 });
 

@@ -61,7 +61,10 @@ export const statusRows = (source: StatusSource): StatusRow[] =>
 export const isHealthy = (source: StatusSource, staleAfterMs: number): boolean => {
   // Audit C6/C12: unhealthy when halted, or when every slot is in error.
   if (source.haltReason?.() !== undefined) return false;
+  // Audit F-B19: a halted slot needs an operator; so does an unacknowledged fresh journal.
+  if (source.journal.needsFreshStartAck) return false;
   const slots = source.journal.slots();
+  if (slots.some((slot) => slot.state === "halted")) return false;
   if (slots.length > 0 && slots.every((slot) => slot.state === "error")) return false;
   const last = source.lastTickEndedAt();
   const reference = last ?? source.startedAt;
@@ -94,6 +97,8 @@ export const startStatusServer = (source: StatusSource, options: { port: number;
           now: new Date(source.now()).toISOString(),
           lastTickEndedAt: source.lastTickEndedAt() ? new Date(source.lastTickEndedAt()!).toISOString() : null,
           halted: source.haltReason?.() ?? null,
+          haltedSlots: source.journal.slots().filter((r) => r.state === "halted").map((r) => ({ slot: r.slot, code: r.lastError?.code ?? null })),
+          freshStartUnacknowledged: source.journal.needsFreshStartAck,
           states: summary.byState,
           offersBuilt: summary.offersBuilt,
           slots: statusRows(source),

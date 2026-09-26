@@ -267,32 +267,45 @@ export class KernelClient {
    * following the keyset cursor). Throws if the kernel cannot be read: callers must not
    * build new offers without this view (audit C1).
    */
-  async liveOffers(colours: readonly string[]): Promise<LiveOfferRow[]> {
+  async liveOffers(colours: readonly string[], maxPages = 100): Promise<LiveOfferRow[]> {
     const out: LiveOfferRow[] = [];
+    const bad = (why: string): never => {
+      throw new Error(`GET /v1/offers: malformed response (${why}); refusing to treat it as an empty book`);
+    };
     for (const colour of colours) {
       let cursor: string | null = null;
-      for (let page = 0; page < 100; page++) {
+      let complete = false;
+      for (let page = 0; page < maxPages; page++) {
         const suffix = cursor ? `&after_hash=${cursor}` : "";
         const answer = await this.#request(`/v1/offers?token=${colour}&direction=GIVING&limit=100${suffix}`, { method: "GET" });
         if (answer.status !== 200) throw new Error(`GET /v1/offers → ${answer.status}`);
-        const body = answer.body as {
-          offers?: { offerId?: string; computed?: { inputNullifiers?: string[]; expiresAt?: string | null; status?: string; gives?: Leg[]; wants?: Leg[] } }[];
-          nextCursor?: string | null;
-        };
-        for (const offer of body.offers ?? []) {
-          if (typeof offer.offerId !== "string") continue;
-          if (offer.computed?.status !== undefined && offer.computed.status !== "live") continue;
+        // Audit F-B15: validate the shape; anything unexpected fails closed.
+        const body = answer.body as { offers?: unknown; nextCursor?: unknown } | null;
+        if (typeof body !== "object" || body === null || !Array.isArray(body.offers)) bad("no offers array");
+        if (!("nextCursor" in body!) || (body!.nextCursor !== null && typeof body!.nextCursor !== "string")) bad("no nextCursor");
+        for (const raw of body!.offers as unknown[]) {
+          const offer = raw as { offerId?: unknown; computed?: { inputNullifiers?: unknown; expiresAt?: unknown; status?: unknown; gives?: unknown; wants?: unknown } };
+          if (typeof offer?.offerId !== "string" || !/^[0-9a-fA-F]{64}$/u.test(offer.offerId)) bad("offer without a 64-hex offerId");
+          const computed = offer.computed;
+          if (typeof computed !== "object" || computed === null || !Array.isArray(computed.inputNullifiers)) bad("offer without computed.inputNullifiers");
+          if (computed!.status !== undefined && computed!.status !== "live") continue;
+          const legs = (value: unknown): Leg[] =>
+            Array.isArray(value) ? value.map((l) => ({ token: String((l as Leg).token).toLowerCase(), amount: String((l as Leg).amount) })) : [];
           out.push({
-            offerId: offer.offerId.toLowerCase(),
-            inputNullifiers: (offer.computed?.inputNullifiers ?? []).map((n) => String(n).toLowerCase()),
-            ...(offer.computed?.expiresAt ? { expiresAt: offer.computed.expiresAt } : {}),
-            gives: (offer.computed?.gives ?? []).map((l) => ({ token: String(l.token).toLowerCase(), amount: String(l.amount) })),
-            wants: (offer.computed?.wants ?? []).map((l) => ({ token: String(l.token).toLowerCase(), amount: String(l.amount) })),
+            offerId: (offer.offerId as string).toLowerCase(),
+            inputNullifiers: (computed!.inputNullifiers as unknown[]).map((n) => String(n).toLowerCase()),
+            ...(typeof computed!.expiresAt === "string" ? { expiresAt: computed!.expiresAt } : {}),
+            gives: legs(computed!.gives),
+            wants: legs(computed!.wants),
           });
         }
-        cursor = body.nextCursor ?? null;
-        if (!cursor) break;
+        cursor = (body!.nextCursor as string | null) ?? null;
+        if (!cursor) {
+          complete = true;
+          break;
+        }
       }
+      if (!complete) throw new Error(`GET /v1/offers: more than ${maxPages} pages for ${colour.slice(0, 12)}…; refusing a partial book`);
     }
     return out;
   }
