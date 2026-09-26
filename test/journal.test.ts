@@ -190,7 +190,9 @@ describe("audit C2/C3", () => {
     const file = join(dir, "state", "j.json");
     const j = open(file);
     expect(j.needsFreshStartAck).toBe(true);
-    j.acknowledgeFreshStart();
+    expect(j.acknowledgeFreshStart("true")).toBe(false);
+    expect(j.needsFreshStartAck).toBe(true);
+    expect(j.acknowledgeFreshStart(j.freshStartToken)).toBe(true);
     expect(open(file).needsFreshStartAck).toBe(false);
   });
 

@@ -41,7 +41,7 @@ const cfg = (extra: Partial<SchedulerConfig> = {}): SchedulerConfig => ({
   submitConfirmMs: 5 * 60_000,
   buildTimeoutMs: 60_000,
   versionCheckEveryTicks: 0,
-  freshStartAck: true,
+  freshStartAck: undefined,
   ...extra,
 });
 
@@ -113,8 +113,11 @@ const rig = (options: {
   });
   const outbox = new Outbox(join(dir, "state", "outbox"));
   const logs: Record<string, unknown>[] = [];
+  // Tests acknowledge their fresh journals with the journal's own token, unless a test sets
+  // freshStartAck itself.
+  const ack = options.config !== undefined && "freshStartAck" in options.config ? options.config.freshStartAck : journal.freshStartToken;
   const scheduler = new Scheduler({
-    cfg: cfg(options.config),
+    cfg: cfg({ ...options.config, freshStartAck: ack }),
     slots: options.slots,
     journal,
     outbox,
@@ -642,11 +645,29 @@ describe("audit fixes: persistence, timeouts, version guard", () => {
   });
 });
 
+describe("third audit pass", () => {
+  test("F-A26: a stale FRESH_START_ACK=true (or another journal's token) does not acknowledge a new journal; its own token does", async () => {
+    const wallet = fundingWallet();
+    for (const stale of ["true", "fresh-00000000"]) {
+      const { scheduler, logs } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), config: { freshStartAck: stale }, journalFile: join(dir, stale, "j.json") });
+      expect(await scheduler.runTick()).toMatchObject({ built: 0 });
+      expect(logs.some((l) => l["phase"] === "fresh-start" && l["result"] === "unacknowledged" && typeof l["token"] === "string")).toBe(true);
+    }
+    const file = join(dir, "own", "j.json");
+    const probe = openJournal({ file, networkId: "stagenet", mode: "single-wallet-pinned" });
+    const token = probe.freshStartToken!;
+    expect(token).toMatch(/^fresh-[0-9a-f]{8}$/);
+    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), config: { freshStartAck: token }, journalFile: file });
+    expect(await scheduler.runTick()).toMatchObject({ built: 1 });
+    expect(scheduler.deps.journal.needsFreshStartAck).toBe(false);
+  });
+});
+
 describe("second audit pass (verification findings)", () => {
   test("F-B15: a fresh journal without FRESH_START_ACK builds and adopts nothing, and /health fails", async () => {
     kernel = new MockKernel().start();
     const wallet = fundingWallet();
-    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel), config: { freshStartAck: false } });
+    const { scheduler, clock } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 2), kernelClient: clientFor(kernel), config: { freshStartAck: undefined } });
     const report = await scheduler.runTick();
     expect(report).toMatchObject({ built: 0, adopted: 0, posted: 0 });
     expect(report.slots.every((r) => r.actions.includes("fresh-journal-unacknowledged"))).toBe(true);
@@ -661,7 +682,7 @@ describe("second audit pass (verification findings)", () => {
     const first = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel) });
     await first.scheduler.runTick();
     for (const offer of kernel.offers.values()) offer.status = "unknown" as never; // accepted, not indexed as live yet
-    const second = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel), clock: first.clock, journalFile: join(dir, "lost", "journal.json"), config: { freshStartAck: false } });
+    const second = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), kernelClient: clientFor(kernel), clock: first.clock, journalFile: join(dir, "lost", "journal.json"), config: { freshStartAck: undefined } });
     expect(await second.scheduler.runTick()).toMatchObject({ built: 0, posted: 0 });
     expect(kernel.offers.size).toBe(1);
   });

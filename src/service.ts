@@ -191,7 +191,7 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
       submitConfirmMs: num("SUBMIT_CONFIRM_SECONDS", 300, 1) * 1000,
       buildTimeoutMs: num("BUILD_TIMEOUT_SECONDS", 300, 1) * 1000,
       versionCheckEveryTicks: num("VERSION_CHECK_EVERY_TICKS", 10),
-      freshStartAck: env("FRESH_START_ACK") === "true",
+      freshStartAck: env("FRESH_START_ACK"),
     },
     reconcileMs: num("RECONCILE_SECONDS", 60, 1) * 1000,
     stateDir,

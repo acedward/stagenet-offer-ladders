@@ -143,8 +143,8 @@ export interface SchedulerConfig {
   readonly buildTimeoutMs: number;
   /** Check the node version every N ticks (0 = only the first tick). */
   readonly versionCheckEveryTicks: number;
-  /** Operator acknowledged a freshly created journal (FRESH_START_ACK=true; audit F-B15). */
-  readonly freshStartAck: boolean;
+  /** FRESH_START_ACK: must equal the fresh journal's own token (audits F-B15, F-A26). */
+  readonly freshStartAck: string | undefined;
 }
 
 export interface SlotPlan extends SlotDefinition {
@@ -282,7 +282,16 @@ export class Scheduler {
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
-    if (deps.journal.needsFreshStartAck && deps.cfg.freshStartAck) deps.journal.acknowledgeFreshStart();
+    if (deps.journal.needsFreshStartAck && !deps.journal.acknowledgeFreshStart(deps.cfg.freshStartAck)) {
+      deps.log({
+        phase: "fresh-start",
+        result: "unacknowledged",
+        token: deps.journal.freshStartToken,
+        detail: "this journal is new: after checking that no earlier offer of these wallets can still be live, start once with FRESH_START_ACK=<token>",
+      });
+    } else if (deps.cfg.freshStartAck !== undefined && deps.cfg.freshStartAck !== "") {
+      deps.log({ phase: "fresh-start", result: "warning", detail: "FRESH_START_ACK is set but the journal is not fresh: remove it from the environment" });
+    }
     for (const slot of deps.slots) deps.journal.ensureSlot(slot);
   }
 

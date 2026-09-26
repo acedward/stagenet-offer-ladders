@@ -99,6 +99,7 @@ export const startStatusServer = (source: StatusSource, options: { port: number;
           halted: source.haltReason?.() ?? null,
           haltedSlots: source.journal.slots().filter((r) => r.state === "halted").map((r) => ({ slot: r.slot, code: r.lastError?.code ?? null })),
           freshStartUnacknowledged: source.journal.needsFreshStartAck,
+          freshStartToken: source.journal.freshStartToken ?? null,
           states: summary.byState,
           offersBuilt: summary.offersBuilt,
           slots: statusRows(source),

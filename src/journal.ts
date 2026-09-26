@@ -35,6 +35,7 @@
  *
  * @module
  */
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -122,10 +123,12 @@ export interface JournalData {
   updatedAt: string;
   /**
    * Audit F-B15: set when this journal was created from nothing. Until an operator
-   * acknowledges it (FRESH_START_ACK=true, after checking that no earlier offer of these
-   * wallets can still be live), the service builds and adopts nothing.
+   * acknowledges it (FRESH_START_ACK=<this journal's token>, after checking that no earlier
+   * offer of these wallets can still be live), the service builds and adopts nothing. The
+   * value is a one-time token bound to THIS journal (audit F-A26): a flag left in `.env`
+   * never acknowledges a later fresh journal. `true` is the pre-token form.
    */
-  freshStart?: boolean;
+  freshStart?: boolean | string;
   slots: Record<string, SlotRecord>;
 }
 
@@ -288,15 +291,25 @@ export class Journal {
 
   /** True while a freshly created journal has not been acknowledged by an operator. */
   get needsFreshStartAck(): boolean {
-    return this.#data.freshStart === true;
+    return this.#data.freshStart !== undefined && this.#data.freshStart !== false;
   }
 
-  acknowledgeFreshStart(): void {
-    if (!this.needsFreshStartAck) return;
+  /** The token an operator must pass as FRESH_START_ACK to acknowledge this journal. */
+  get freshStartToken(): string | undefined {
+    const value = this.#data.freshStart;
+    if (value === undefined || value === false) return undefined;
+    return typeof value === "string" ? value : `fresh-${this.#data.createdAt.replace(/[^0-9]/gu, "")}`;
+  }
+
+  /** Acknowledge with the journal's own token; any other value (e.g. a stale `true`) is refused. */
+  acknowledgeFreshStart(token: string | undefined): boolean {
+    if (!this.needsFreshStartAck) return true;
+    if (token === undefined || token !== this.freshStartToken) return false;
     this.#mutate((data) => {
       delete data.freshStart;
       return undefined;
     });
+    return true;
   }
 
   toJSON(): JournalData {
@@ -635,7 +648,7 @@ export function openJournal(options: OpenJournalOptions): Journal {
   }
   const fresh = (): Journal => {
     const at = now().toISOString();
-    const journal = Journal._create(file, { version: JOURNAL_VERSION, networkId, mode, createdAt: at, updatedAt: at, freshStart: true, slots: {} }, now, write);
+    const journal = Journal._create(file, { version: JOURNAL_VERSION, networkId, mode, createdAt: at, updatedAt: at, freshStart: `fresh-${randomUUID().slice(0, 8)}`, slots: {} }, now, write);
     journal.flush();
     return journal;
   };
