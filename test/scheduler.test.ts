@@ -10,6 +10,7 @@ import { KernelClient } from "../src/kernel-client.ts";
 import { Outbox } from "../src/outbox.ts";
 import { chooseCoin, retryDelayMs, Scheduler, type SchedulerConfig, type SlotPlan } from "../src/scheduler.ts";
 import { isHealthy, startStatusServer, statusRows } from "../src/status.ts";
+import { checkStall } from "../src/watchdog.ts";
 import { COLOUR_A, COLOUR_B, COLOUR_C, coin, decodeFakeOffer, FakeClock, FakeWallet, FakeWallets, MockKernel } from "./helpers.ts";
 
 const HOUR = 3_600_000;
@@ -646,6 +647,34 @@ describe("audit fixes: persistence, timeouts, version guard", () => {
 });
 
 describe("third audit pass", () => {
+  test("F-B28: sustained 429s with Retry-After 300 on every kernel call never trip the watchdog", async () => {
+    kernel = new MockKernel().start();
+    const wallet = fundingWallet();
+    const clock = new FakeClock();
+    let scheduler: Scheduler | undefined;
+    const sleeps: number[] = [];
+    const client = new KernelClient({
+      baseUrl: kernel.url,
+      sleep: (ms) => clock.sleep(ms),
+      onSleep: (ms) => {
+        sleeps.push(ms);
+        scheduler?.noteProgress();
+      },
+      random: () => 0.5,
+    });
+    const r = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 4), kernelClient: client, clock });
+    scheduler = r.scheduler;
+    await scheduler.runTick(); // 4 offers submitted
+    kernel.rateLimitAll = 300;
+    const before = clock.now();
+    await scheduler.runTick(); // every status read is rate-limited
+    expect(clock.now() - before).toBeGreaterThan(30 * 60_000); // the tick itself spans more than the watchdog
+    // …but each call stayed within its 10 min budget and every sleep counted as progress
+    expect(checkStall({ lastProgress: () => scheduler!.lastProgressAt, startedAt: before, limitMs: 30 * 60_000, now: () => clock.now() })).toBeUndefined();
+    expect(Math.max(...sleeps)).toBeLessThanOrEqual(300_000);
+    kernel.rateLimitAll = undefined;
+  });
+
   test("F-A26: a stale FRESH_START_ACK=true (or another journal's token) does not acknowledge a new journal; its own token does", async () => {
     const wallet = fundingWallet();
     for (const stale of ["true", "fresh-00000000"]) {

@@ -195,6 +195,8 @@ export class MockKernel {
   statusCalls = 0;
   successStatus = 200;
   listUnavailable = false;
+  /** Answer every POST and status read with 429 (Retry-After in seconds). */
+  rateLimitAll: number | undefined;
   #server: ReturnType<typeof Bun.serve> | undefined;
 
   get url(): string {
@@ -207,6 +209,10 @@ export class MockKernel {
       hostname: "127.0.0.1",
       fetch: async (request) => {
         const url = new URL(request.url);
+        if (this.rateLimitAll !== undefined && (request.method === "POST" || url.pathname.endsWith("/status"))) {
+          if (request.method === "POST") this.posts.push("");
+          return Response.json({ error: "RATE_LIMITED" }, { status: 429, headers: { "retry-after": String(this.rateLimitAll) } });
+        }
         if (request.method === "POST" && url.pathname === "/v1/offers") {
           const body = (await request.json()) as { offer?: string };
           this.posts.push(body.offer ?? "");

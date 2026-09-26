@@ -106,6 +106,8 @@ export interface KernelClientOptions {
   readonly maxRetryAfterMs?: number;
   /** Upper bound on the total sleep of one call (default 10 min, below the watchdog; audit F-A19). */
   readonly maxTotalSleepMs?: number;
+  /** Called before every retry sleep: the service counts it as progress (audit F-B28). */
+  readonly onSleep?: (ms: number) => void;
 }
 
 interface Answer {
@@ -149,6 +151,7 @@ export class KernelClient {
   readonly #log: (fields: Record<string, unknown>) => void;
   readonly #maxRetryAfterMs: number;
   readonly #maxTotalSleepMs: number;
+  readonly #onSleep: (ms: number) => void;
 
   constructor(options: KernelClientOptions) {
     if (!/^https?:\/\//u.test(options.baseUrl)) throw new Error("kernel client: baseUrl must be an http(s) URL");
@@ -165,6 +168,19 @@ export class KernelClient {
     this.#log = options.log ?? (() => undefined);
     this.#maxRetryAfterMs = options.maxRetryAfterMs ?? 300_000;
     this.#maxTotalSleepMs = options.maxTotalSleepMs ?? 600_000;
+    this.#onSleep = options.onSleep ?? (() => undefined);
+  }
+
+  /** A per-call sleep budget shared by every kernel operation (audit F-B28). */
+  #budget(): (ms: number) => Promise<boolean> {
+    let slept = 0;
+    return async (ms: number): Promise<boolean> => {
+      if (slept + ms > this.#maxTotalSleepMs) return false;
+      slept += ms;
+      this.#onSleep(ms);
+      await this.#sleep(ms);
+      return true;
+    };
   }
 
   /** A server `Retry-After`, capped (audit C6: a hostile or buggy 86400 must not stall us for a day). */
@@ -199,13 +215,7 @@ export class KernelClient {
 
   /** `POST /v1/offers { offer }` with the retry policy above. Never throws for HTTP answers. */
   async postOffer(blob: string): Promise<PostOutcome> {
-    let slept = 0;
-    const nap = async (ms: number): Promise<boolean> => {
-      if (slept + ms > this.#maxTotalSleepMs) return false;
-      slept += ms;
-      await this.#sleep(ms);
-      return true;
-    };
+    const nap = this.#budget();
     let transportFailures = 0;
     let sameBlobRetries = 0;
     let attempts = 0;
@@ -273,6 +283,7 @@ export class KernelClient {
   async offerStatus(offerId: string): Promise<KernelOfferStatus> {
     if (!/^[0-9a-f]{64}$/u.test(offerId)) throw new Error("offerStatus: offerId must be 64 lowercase hex");
     let failures = 0;
+    const nap = this.#budget();
     for (;;) {
       let answer: Answer | undefined;
       let error: string | undefined;
@@ -287,8 +298,9 @@ export class KernelClient {
         throw new Error(`GET /v1/offers/${offerId}/status → ${answer.status}: ${JSON.stringify(answer.body).slice(0, 200)}`);
       }
       failures += 1;
-      if (failures >= this.#attempts) throw new Error(`GET /v1/offers/${offerId}/status unavailable: ${error ?? answer?.status}`);
-      await this.#sleep(this.retryAfterDelay(answer?.retryAfterMs, failures));
+      if (failures >= this.#attempts || !(await nap(this.retryAfterDelay(answer?.retryAfterMs, failures)))) {
+        throw new Error(`GET /v1/offers/${offerId}/status unavailable: ${error ?? answer?.status}`);
+      }
     }
   }
 

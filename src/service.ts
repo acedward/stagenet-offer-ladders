@@ -292,9 +292,14 @@ const createServiceLocked = async (config: ServiceConfig, logLine: (line: string
     const missing = config.slots.filter((slot) => !mnemonics.has(slot.walletId)).map((slot) => slot.slot);
     if (missing.length > 0) throw new LadderConfigError(`no maker wallet for slot(s) ${missing.join(", ")}`);
   }
-  const wallets = new SessionPool(mnemonics, { network: config.network, dustParameters: parameters.dust, log: logLine }, config.walletStaggerMs);
+  let progress: () => void = () => undefined; // bound to the scheduler below (audit F-B28)
+  const wallets = new SessionPool(
+    mnemonics,
+    { network: config.network, dustParameters: parameters.dust, log: logLine, onProgress: () => progress() },
+    config.walletStaggerMs,
+  );
   const kernel = config.zswapApi
-    ? new KernelClient({ baseUrl: config.zswapApi, log: (fields) => logLine(formatFields({ ...fields })) })
+    ? new KernelClient({ baseUrl: config.zswapApi, log: (fields) => logLine(formatFields({ ...fields })), onSleep: () => progress() })
     : undefined;
   const scheduler = new Scheduler({
     cfg: config.scheduler,
@@ -317,6 +322,7 @@ const createServiceLocked = async (config: ServiceConfig, logLine: (line: string
       setTimeout(() => process.exit(70), 1_000).unref?.();
     },
   });
+  progress = () => scheduler.noteProgress();
   const service: Service = {
     config,
     journal,

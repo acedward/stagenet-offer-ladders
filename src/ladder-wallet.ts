@@ -61,6 +61,8 @@ export interface SessionFactoryOptions {
   readonly dustParameters: ledger.DustParameters;
   readonly log: (line: string) => void;
   readonly syncTimeoutMs?: number;
+  /** Called when a wallet finished its initial sync (counts as progress; audit F-B28). */
+  readonly onProgress?: () => void;
 }
 
 /** What the pool needs from a session (a `WalletSession`, or a fake in tests). */
@@ -119,6 +121,7 @@ export class SessionPool implements WalletPort {
           await session.close().catch(() => undefined);
           throw error;
         }
+        this.#options.onProgress?.();
         return { session, wallet: ladderWalletOf(walletId, session) };
       });
       this.#opening = opened.catch(() => undefined);

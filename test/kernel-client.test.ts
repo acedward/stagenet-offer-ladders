@@ -134,6 +134,14 @@ describe("POST /v1/offers against the mock kernel", () => {
     expect(sleeps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(600_000);
   });
 
+  test("F-B28: offerStatus shares the same total sleep budget", async () => {
+    kernel.rateLimitAll = 300;
+    const c = new KernelClient({ baseUrl: kernel.url, sleep: async (ms) => { sleeps.push(ms); }, attempts: 10, random: () => 0.5 });
+    await expect(c.offerStatus("a".repeat(64))).rejects.toThrow(/unavailable/);
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(600_000);
+    kernel.rateLimitAll = undefined;
+  });
+
   test("429 honours Retry-After", async () => {
     kernel.script.push({ status: 429, body: { error: "RATE_LIMITED" }, headers: { "retry-after": "7" } });
     expect(await client.postOffer(blobOf(9))).toMatchObject({ kind: "accepted", attempts: 2 });

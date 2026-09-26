@@ -308,6 +308,11 @@ export class Scheduler {
     return this.#lastProgressAt;
   }
 
+  /** Bounded waits that are still work (kernel retry sleeps, a finished wallet sync) count as progress (audit F-B28). */
+  noteProgress(): void {
+    this.#lastProgressAt = this.deps.clock.now();
+  }
+
   /** Set when the node/ledger version guard failed (audit C12): nothing is built or posted. */
   get haltReason(): string | undefined {
     return this.#haltReason;
