@@ -285,6 +285,40 @@ describe("wallet-per-slot (production shape)", () => {
     expect(record.history.filter((h) => h.outcome === "consumed")).toHaveLength(10);
   });
 
+  test("00057 book slot on a mapped wallet: a 2 wUSDC bid maker fills twice from its change, other colours untouched", async () => {
+    const USDC = 1_000_000n;
+    // Maker AB-06 also holds its native 1,000 stkA and a want-leg proceed; neither is eligible.
+    const maker = new FakeWallet("AB-06", [coin(COLOUR_C, "wusdc", 2n * USDC), coin(COLOUR_A, "native-stkA", 10n * GIVE), coin(COLOUR_B, "proceeds", 104_166_667n)]);
+    const slots: SlotPlan[] = [
+      {
+        slot: "ABID-01",
+        ladder: "ABID",
+        level: 0,
+        walletId: "AB-06",
+        giveColour: COLOUR_C,
+        wantColour: COLOUR_B,
+        giveAmount: USDC.toString(),
+        wantAmount: "104166667",
+        price: "0.0096",
+        side: "bid",
+        pair: "wStkA/wUSDC",
+      },
+    ];
+    const { scheduler } = rig({ wallets: [maker], slots, config: { mode: "wallet-per-slot", coinPolicy: "at-least" } });
+    expect(await scheduler.runTick()).toMatchObject({ built: 1, errors: 0 });
+    const first = scheduler.deps.journal.get("ABID-01")!;
+    expect(first).toMatchObject({ walletId: "AB-06", side: "bid", pair: "wStkA/wUSDC", price: "0.0096" });
+    expect(first.current!.coinValue).toBe((2n * USDC).toString());
+    maker.spend(first.current!.coinNonce, coin(COLOUR_C, "change-1", USDC));
+    expect(await scheduler.runTick()).toMatchObject({ consumed: 1, built: 1 });
+    const second = scheduler.deps.journal.get("ABID-01")!.current!;
+    expect(second.coinValue).toBe(USDC.toString());
+    maker.spend(second.coinNonce);
+    expect(await scheduler.runTick()).toMatchObject({ consumed: 1, depleted: 1 });
+    expect(scheduler.deps.journal.get("ABID-01")!.state).toBe("depleted");
+    expect(maker.builds).toBe(2);
+  });
+
   test("each slot uses its own wallet and pin controller", async () => {
     const wallets = testSlots((s) => s).map((s) => new FakeWallet(s.slot, [coin(s.giveColour, `inv-${s.slot}`, 10n * GIVE)]));
     const { scheduler } = rig({ wallets, slots: testSlots((s) => s), config: { mode: "wallet-per-slot", coinPolicy: "at-least" } });

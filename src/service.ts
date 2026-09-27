@@ -21,7 +21,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { openJournal, type Journal } from "./journal.ts";
+import { checkBridgedColours } from "./bridge.ts";
+import { CLAIMING_STATES, openJournal, type Journal } from "./journal.ts";
 import { KernelClient } from "./kernel-client.ts";
 import { buildSlots, type CoinPolicy, LadderConfigError, type LadderFile, readLadderFile, resolveColours, validateColours, WALLET_MODES, type WalletMode } from "./ladder.ts";
 import { FUNDING_WALLET_ID, SessionPool } from "./ladder-wallet.ts";
@@ -160,18 +161,21 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
   const resolved = existsSync(tokensFile) ? coloursFromDeployments(JSON.parse(readFileSync(tokensFile, "utf8")), Object.keys(ladders.tokens)) : {};
   const colours = resolveColours(ladders, resolved);
   validateColours(ladders, colours);
+  checkBridgedColours(ladders, colours); // 00057: a bridged token's colour must be the vault's
   const network = stagenet();
   if (network.networkId !== ladders.networkId) throw new LadderConfigError(`ladder file is for ${ladders.networkId}, network is ${network.networkId}`);
   const slots: SlotPlan[] = buildSlots(ladders).map((slot) => ({
     slot: slot.id,
     ladder: slot.ladder,
     level: slot.level,
-    walletId: mode === "single-wallet-pinned" ? FUNDING_WALLET_ID : slot.id,
+    // 00057: a ladder's `wallets` maps its slots onto existing makers (default: wallet = slot id).
+    walletId: mode === "single-wallet-pinned" ? FUNDING_WALLET_ID : slot.walletId,
     giveColour: colours[slot.giveSymbol]!,
     wantColour: colours[slot.wantSymbol]!,
     giveAmount: slot.giveAmount.toString(),
     wantAmount: slot.wantAmount.toString(),
     price: slot.priceText,
+    ...(slot.side === undefined ? {} : { side: slot.side, pair: slot.pair }),
   }));
   const ttlMinutes = num("OFFER_TTL_MINUTES", 60, 1);
   const offerTtlMs = ttlMinutes * 60_000;
@@ -262,6 +266,17 @@ export const createService = async (config: ServiceConfig, logLine: (line: strin
   }
 };
 
+/**
+ * 00057: slots with an outstanding offer (a claimed coin) that the ladder file no longer
+ * has. The scheduler never reconciles them, so their coins would stay claimed and two books
+ * would share one journal. A switch to another ladder file needs a fresh journal
+ * (`JOURNAL_FILE` / `OUTBOX_DIR`); the start is refused until then.
+ */
+export const orphanClaims = (journal: Pick<Journal, "slots">, slots: readonly { slot: string }[]): string[] => {
+  const configured = new Set(slots.map((s) => s.slot));
+  return journal.slots().filter((r) => !configured.has(r.slot) && CLAIMING_STATES.includes(r.state)).map((r) => r.slot);
+};
+
 /** A journal of the OTHER wallet mode in the same directory that still claims coins (audit C1). */
 const otherModeClaims = (config: ServiceConfig): string | undefined => {
   const other = config.mode === "single-wallet-pinned" ? "wallet-per-slot" : "single-wallet-pinned";
@@ -282,6 +297,13 @@ const createServiceLocked = async (config: ServiceConfig, logLine: (line: string
     throw new LadderConfigError(`refusing to start in ${config.mode}: ${conflict}; retire those offers first (or JOURNAL_RESET=true)`);
   }
   const journal = openJournal({ file: config.journalFile, networkId: config.ladders.networkId, mode: config.mode, reset: config.journalReset });
+  const orphans = orphanClaims(journal, config.slots);
+  if (orphans.length > 0) {
+    throw new LadderConfigError(
+      `journal ${config.journalFile} has outstanding offers for ${orphans.length} slot(s) not in ${config.ladderFile} ` +
+        `(${orphans.slice(0, 5).join(", ")}${orphans.length > 5 ? ", …" : ""}): point JOURNAL_FILE and OUTBOX_DIR at a fresh journal for this ladder file`,
+    );
+  }
   const revived = journal.reviveDepleted();
   if (revived.length > 0) logLine(`re-checking depleted slots at startup: ${revived.join(", ")}`);
   const outbox = new Outbox(config.outboxDir);
@@ -362,6 +384,7 @@ const createServiceLocked = async (config: ServiceConfig, logLine: (line: string
         haltReason: () => scheduler.haltReason,
         inventory: (slot) => scheduler.inventory(slot),
         now: () => Date.now(),
+        tokenDecimals: Object.fromEntries(Object.entries(config.ladders.tokens).map(([symbol, token]) => [symbol, token.decimals])),
       },
       { port: config.statusPort, hostname: config.statusHost, staleAfterMs: Math.max(3 * config.reconcileMs, 10 * 60_000) },
     );

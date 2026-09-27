@@ -101,8 +101,11 @@ export interface SlotDefinition {
   /** Base units, canonical decimal strings. */
   readonly giveAmount: string;
   readonly wantAmount: string;
-  /** Price, 3 decimals (display). */
+  /** Display price: want per give, 3 decimals (grid); quote per base as configured (book). */
   readonly price: string;
+  /** Book slots only (00057): `ask` or `bid`, and the pair `base/quote` (display). */
+  readonly side?: "ask" | "bid";
+  readonly pair?: string;
 }
 
 export interface SlotRecord extends SlotDefinition {

@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "networkId": "stagenet",
+  "mode": "wallet-per-slot",
+  "coinPolicy": "at-least",
+  "tokens": {
+    "wStkA": {
+      "decimals": 6,
+      "colour": "5eb2a3cebb2ebe7ba910c78f62c9e28e0d74acbd00c810730def3578860e6a02",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x2Ab7BE0769e3BBD5c7d047B422CB383fCC06FB52" }
+    },
+    "wStkB": {
+      "decimals": 6,
+      "colour": "e7ca18cb056477a5aca5cce387306d56526c2f226b4a4e34f068e3a3e8179588",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0xF2bEFf36543219C8feC2AB2f42070AA65D3C844B" }
+    },
+    "wUSDC": {
+      "decimals": 6,
+      "colour": "PENDING: fill in from AA 00037 P7 (deployments/stagenet-vault.json, bridgedTokens wUSDC)",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238" }
+    }
+  },
+  "ladders": [
+    {
+      "id": "AASK",
+      "side": "ask",
+      "base": "wStkA",
+      "quote": "wUSDC",
+      "prices": ["0.0104", "0.0108", "0.0112", "0.0116", "0.0120"],
+      "giveTokens": "100",
+      "inventoryTokens": "1000",
+      "wallets": ["AB-01", "AB-02", "AB-03", "AB-04", "AB-05"]
+    },
+    {
+      "id": "ABID",
+      "side": "bid",
+      "base": "wStkA",
+      "quote": "wUSDC",
+      "prices": ["0.0096", "0.0092", "0.0088", "0.0084", "0.0080"],
+      "giveTokens": "1",
+      "inventoryTokens": "2",
+      "wallets": ["AB-06", "AB-07", "AB-08", "AB-09", "AB-10"]
+    },
+    {
+      "id": "BASK",
+      "side": "ask",
+      "base": "wStkB",
+      "quote": "wUSDC",
+      "prices": ["0.0104", "0.0108", "0.0112", "0.0116", "0.0120"],
+      "giveTokens": "100",
+      "inventoryTokens": "1000",
+      "wallets": ["BC-01", "BC-02", "BC-03", "BC-04", "BC-05"]
+    },
+    {
+      "id": "BBID",
+      "side": "bid",
+      "base": "wStkB",
+      "quote": "wUSDC",
+      "prices": ["0.0096", "0.0092", "0.0088", "0.0084", "0.0080"],
+      "giveTokens": "1",
+      "inventoryTokens": "2",
+      "wallets": ["BC-06", "BC-07", "BC-08", "BC-09", "BC-10"]
+    }
+  ]
+}

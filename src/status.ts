@@ -6,10 +6,12 @@
  *   otherwise. Suitable for a Compose health check.
  * - `GET /status` is the slot table: per slot the ladder, price, wallet id (never a
  *   secret), state, current offer id, pinned coin (nonce prefix), expiry, remaining
- *   inventory and the last error code. Public data only.
+ *   inventory and the last error code; for book slots (00057) also the side and the pair,
+ *   and per pair the best bid, best ask and depth (`books`). Public data only.
  *
  * @module
  */
+import { bookSummary } from "./book.ts";
 import type { Journal, SlotRecord } from "./journal.ts";
 
 export interface StatusSource {
@@ -22,11 +24,17 @@ export interface StatusSource {
   haltReason?: (() => string | undefined) | undefined;
   inventory(slot: string): { coins: number; value: bigint } | undefined;
   now(): number;
+  /** Token decimals by symbol, to show book depth in whole tokens (optional). */
+  readonly tokenDecimals?: Readonly<Record<string, number>> | undefined;
 }
 
 export interface StatusRow {
   readonly slot: string;
   readonly ladder: string;
+  /** Book slots: `ask` / `bid` and `base/quote`; null for grid slots. */
+  readonly side: "ask" | "bid" | null;
+  readonly pair: string | null;
+  /** Grid: want per give (3 decimals). Book: the level price in quote per base. */
   readonly price: string;
   readonly walletId: string;
   readonly state: SlotRecord["state"];
@@ -45,6 +53,8 @@ export const statusRows = (source: StatusSource): StatusRow[] =>
     return {
       slot: record.slot,
       ladder: record.ladder,
+      side: record.side ?? null,
+      pair: record.pair ?? null,
       price: record.price,
       walletId: record.walletId,
       state: record.state,
@@ -102,6 +112,7 @@ export const startStatusServer = (source: StatusSource, options: { port: number;
           freshStartToken: source.journal.freshStartToken ?? null,
           states: summary.byState,
           offersBuilt: summary.offersBuilt,
+          books: bookSummary(source.journal.slots(), source.tokenDecimals),
           slots: statusRows(source),
         });
       }

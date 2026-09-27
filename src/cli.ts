@@ -277,7 +277,8 @@ const offersVerify: Command = async (flags) => {
   const outbox = new Outbox(config.outboxDir);
   const pool = config.ladders.includeNonces ? new Set(config.ladders.includeNonces) : undefined;
   const reserves = new Set(config.ladders.excludeNonces ?? []);
-  const result = verifyCurrentOffers(journal, outbox, { ...(pool ? { pool } : {}), reserves });
+  const tokenDecimals = Object.fromEntries(Object.entries(config.ladders.tokens).map(([symbol, token]) => [symbol, token.decimals]));
+  const result = verifyCurrentOffers(journal, outbox, { ...(pool ? { pool } : {}), reserves, slots: config.slots, tokenDecimals });
   printResult({ result: result.pass ? "PASS" : "FAIL", ...result });
   return result.pass ? 0 : 1;
 };
