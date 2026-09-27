@@ -131,6 +131,12 @@ export interface LadderFile {
    * test). Coins the wallet receives later (e.g. a settlement's outputs) are never adopted.
    */
   readonly includeNonces?: readonly string[] | undefined;
+  /**
+   * If set, ONLY these slots run (a staged rollout: e.g. `["AB-01", "AB-02", "BC-01"]`). Each
+   * slot keeps the price and amounts it has in the full ladder, so a journal started with a
+   * subset carries over unchanged when the full ladder file is used later (P12).
+   */
+  readonly onlySlots?: readonly string[] | undefined;
 }
 
 /** One ladder slot: a fixed-price offer position. */
@@ -230,6 +236,15 @@ export const parseLadderFile = (raw: unknown): LadderFile => {
     }
     includeNonces = includeRaw as string[];
   }
+  const onlyRaw = raw["onlySlots"];
+  let onlySlots: string[] | undefined;
+  if (onlyRaw !== undefined) {
+    if (!Array.isArray(onlyRaw) || onlyRaw.length === 0 || !onlyRaw.every((s) => typeof s === "string" && /^[A-Z][A-Z0-9]{0,7}-[0-9]{2}$/u.test(s))) {
+      throw new LadderConfigError('"onlySlots" must be a non-empty array of slot ids like "AB-01"');
+    }
+    if (new Set(onlyRaw).size !== onlyRaw.length) throw new LadderConfigError('"onlySlots" lists a slot twice');
+    onlySlots = onlyRaw as string[];
+  }
   return {
     version: 1,
     networkId,
@@ -239,6 +254,7 @@ export const parseLadderFile = (raw: unknown): LadderFile => {
     ladders,
     excludeNonces,
     includeNonces,
+    onlySlots,
   };
 };
 
@@ -252,8 +268,21 @@ export const readLadderFile = (path: string): LadderFile => {
   return parseLadderFile(raw);
 };
 
-/** Every slot of every ladder, in ladder order then level order. */
+/**
+ * Every slot of every ladder, in ladder order then level order; only the `onlySlots` ones if
+ * the file lists them (each keeps its full-ladder level, price and amounts).
+ */
 export const buildSlots = (file: LadderFile): Slot[] => {
+  const all = buildAllSlots(file);
+  if (file.onlySlots === undefined) return all;
+  const known = new Set(all.map((slot) => slot.id));
+  const unknown = file.onlySlots.filter((id) => !known.has(id));
+  if (unknown.length > 0) throw new LadderConfigError(`"onlySlots" names slot(s) not in the ladders: ${unknown.join(", ")}`);
+  const wanted = new Set(file.onlySlots);
+  return all.filter((slot) => wanted.has(slot.id));
+};
+
+const buildAllSlots = (file: LadderFile): Slot[] => {
   const slots: Slot[] = [];
   for (const ladder of file.ladders) {
     const give = file.tokens[ladder.give]!;
