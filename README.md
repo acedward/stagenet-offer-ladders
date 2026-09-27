@@ -142,7 +142,7 @@ or wallet state. It is kept out as follows:
 
 ## Offer ladders (project 00053)
 
-> **Since 2026-09-27 the running service quotes the 00057 stock/USDC books** (`LADDER_FILE=ladders/stagenet.usdc.json`, see "Stock/USDC books" below). The AB/BC grid ladders described here are retired: they were never posted, and their journal is archived. The service, its modes and its operating rules are unchanged.
+> **Since 2026-09-27 the running service quotes the 00057 stock/USDC books** (`LADDER_FILE=ladders/stagenet.usdc.json`, see "Stock/USDC books" below), and since 20:57 UTC that day it **posts them to the stagenet kernel** (`ZSWAP_API=https://stagenet.api-zswap.zkdojo.com`, "Runbook (books)" step 7). The AB/BC grid ladders described here are retired: they were never posted, and their journal is archived. The service, its modes and its operating rules are unchanged.
 
 Two ladders of fixed-price Offer Files, kept valid by a long-running service:
 
@@ -184,10 +184,12 @@ are in `ladders/makers.stagenet.public.json`.
    token (AB → stkA, BC → stkB) as one coin of `INVENTORY_OFFERS` × 100 (default 1,000).
    Idempotent: a maker with a recorded mint (`state/maker-mints.json`), one that already
    holds the amount, or one without DUST is skipped.
-5. **Point at the kernel**: once the stagenet kernel is deployed, set `ZSWAP_API`
-   (expected `https://stagenet.api-zswap.zkdojo.com`) and register stkA/stkB/stkC there
-   (colours in `deployments/stagenet.json`). With `ZSWAP_API` empty the service runs in
-   **outbox mode**: offers are built and stored in `state/outbox/`, not posted.
+5. **Point at the kernel**: the stagenet kernel is live at
+   `https://stagenet.api-zswap.zkdojo.com` (site `https://stagenet.zswap.zkdojo.com/`). Set
+   `ZSWAP_API` to it; for the books this is "Runbook (books)" step 7. Registering token names
+   on the kernel is the kernel operator's job and is not needed to post: on 2026-09-27 it
+   accepted the unregistered wStkA/wStkB/wUSDC colours. With `ZSWAP_API` empty the service
+   runs in **outbox mode**: offers are built and stored in the outbox directory, not posted.
 6. **Run** (from the repository directory):
    - `cp .env.example .env`, then edit it: `LADDER_FILE` with its own `JOURNAL_FILE` and
      `OUTBOX_DIR` (the example defaults are the live books), `LADDER_MEM_LIMIT` (2g is enough
@@ -257,10 +259,9 @@ The production shape runs in stages. Stages 1 and 2 ran on stagenet on 2026-09-2
    - RSS 362 MiB at start, **≈ 0.71–0.72 GiB** with 20 wallets open: 2g leaves ≈ 2.8×;
    - `offers:verify` 20/20 PASS: AB at 0.800 … 1.200 (want 80 … 120 stkB), BC the same in
      stkC.
-3. **Still to do: kernel mode.** Before relying on kernel mode unattended, run one real post
-   against the stagenet kernel (or FR-006's local devnet + kernel end-to-end) and watch
-   `/status` go `submitted` → `live`. Then set `ZSWAP_API` and restart: the stored offers
-   are published as they are (no rebuild).
+3. **Kernel mode: done on 2026-09-27 for the books** ("Runbook (books)" step 7). One stored
+   offer was posted by hand first and listed `live`; then `ZSWAP_API` was set and the ladder
+   recreated. The stored offers were published as they were (no rebuild).
 
 `Wallet.Sync: [object CloseEvent]` lines with a stack trace in the log are the wallet SDK
 reporting an indexer websocket that closed; the SDK reconnects by itself (exponential
@@ -417,6 +418,8 @@ unchanged) or a **book** side:
 | Circle USDC (Sepolia, 6 decimals) | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
 | Native stkA / stkB / stkC (00052) | contracts and colours in the table at the top (`deployments/stagenet.json`) |
 | Maker public addresses | `ladders/makers.stagenet.public.json` (20 wallets AB-01…10, BC-01…10) |
+| Stagenet Offer Files kernel API (`ZSWAP_API`) | `https://stagenet.api-zswap.zkdojo.com` |
+| Stagenet Offer Files site | `https://stagenet.zswap.zkdojo.com/` |
 
 | Ladder file | What it is for |
 |---|---|
@@ -512,6 +515,56 @@ Run the commands from the repository directory. `scripts/ladder-run.sh` mounts
    Buying `AASK-01` pays 1.04 wUSDC for 100 wStkA. Selling into `ABID-01` pays 104.166667
    wStkA for 1 wUSDC. The running service sees the maker's coin spent, marks the slot
    `consumed` and re-offers from the change coin within a reconcile interval.
+
+7. **Kernel mode: post the books to the stagenet kernel** (live since 2026-09-27 20:57 UTC).
+   The switch builds nothing: the stored outbox blobs are published as they are.
+   1. First check that the kernel accepts the book's colours. Post one stored offer by hand;
+      these are the exact bytes the service would send, and all of it is public data:
+
+      ```sh
+      K=https://stagenet.api-zswap.zkdojo.com
+      ID=$(curl -s http://127.0.0.1:$STATUS_HOST_PORT/status | jq -r '.slots[] | select(.slot=="AASK-01") | .offerId')
+      jq -c '{offer: .blob}' ~/.stagenet-offer-ladders/state/outbox-books/$ID.json \
+        | curl -s -X POST -H 'content-type: application/json' --data-binary @- $K/v1/offers
+      curl -s $K/v1/offers/$ID/status
+      ```
+
+      - An answer of `{"success":true,"offerId":"<ID>",…}` (or `409 DUPLICATE_OFFER`) means
+        the offer was accepted. Its status turns `live` within about 30 s.
+      - A refusal (`422 UNPRICED_TOKEN` or `NOT_SPONSORED`, or a `400` code) means: do not
+        switch. The kernel operator must allow unpriced tokens (`BATCHER_SPONSOR_UNPRICED=allow`)
+        or give the tokens a price.
+   2. In `.env`, set `ZSWAP_API=https://stagenet.api-zswap.zkdojo.com`, with no comment on that
+      line. Then recreate only the ladder: `docker compose up -d --timeout 150 ladder`. Never
+      use `down -v`, and never reset the journal.
+   3. Watch the switch:
+      - Tick 1 opens the makers one at a time, about 115 s each. Each `stored` slot is
+        published right after its wallet syncs, so the first post comes about 2 min after the
+        start and the last about 40 min after.
+      - `/status` shows each slot go `stored` → `submitted` → `live`. A slot turns `live` on
+        its next reconcile, once the kernel's `inputNullifiers` match the pinned coin. For the
+        slots posted in tick 1 that is tick 2, which starts after the last wallet has opened.
+        A slot you posted by hand goes straight from `stored` to `live`.
+      - `curl -s $K/v1/offers | jq '.offers | length'` counts the listed offers.
+   4. **A refusal after the switch** shows in the log as `phase=post … result=rejected`, and in
+      `/status` as `rejected`. The service would rebuild a rejected slot on the same coin and
+      post it again with a doubling backoff (60 s × 2^(n−1), capped at 60 min). Revert at once:
+      set `ZSWAP_API=` (empty) in `.env` and run `docker compose up -d --timeout 150 ladder`.
+      That returns the service to outbox mode, and the journal keeps the coins claimed.
+   5. **Slow answers are not refusals.** A POST can take longer than the client's 30 s
+      timeout. The client then posts the same blob again. In the one case seen, the kernel
+      answered the re-posts with `500 INTERNAL` for about 30 s, then with `409 DUPLICATE_OFFER`,
+      which counts as accepted. The client makes 6 attempts per call. If all 6 fail, the
+      service posts the same blob again after `SUBMIT_CONFIRM_SECONDS`; it never builds a new
+      offer for this.
+   6. **Measured on 2026-09-27**: the hand post of `AASK-01` answered `200` in 7.4 s, and the
+      offer was `live` 24 s later. The service was recreated at 20:57:31 UTC. Tick 1 posted
+      the other 19 offers in 41.7 min: 18 were accepted on the first attempt, and one was
+      answered `DUPLICATE_OFFER` after a timeout and four `500 INTERNAL`. Nothing was
+      refused. All 20 were `live` at 21:40, `GET /v1/offers` listed exactly the service's 20
+      ids, and the ladder's RSS was 675 MiB. The first fill through the kernel (another
+      client bought `AASK-01` at 21:25) was re-offered from the maker's change on the next
+      tick.
 
 ### Local end-to-end (`e2e/local-books.sh`)
 
