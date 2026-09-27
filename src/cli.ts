@@ -23,7 +23,7 @@ import { createService, fundingLock, loadServiceConfig } from "./service.ts";
 import { takeServiceLock } from "./service-lock.ts";
 import { startWatchdog } from "./watchdog.ts";
 import { openMakerOps } from "./maker-ops.ts";
-import { loadMintRecords, type MintRecord, mintAll, registerDustAll, serializeMintRecords } from "./makers.ts";
+import { balanceRow, loadMintRecords, type MintRecord, mintAll, registerDustAll, serializeMintRecords } from "./makers.ts";
 import { redact, redactDeep } from "./redact.ts";
 import { settleOffer } from "./settle.ts";
 import type { TokenId } from "./tokens.ts";
@@ -173,7 +173,11 @@ const walletsCheck: Command = async (flags) => {
   return pass ? 0 : 1;
 };
 
-/** makers:status --slots AB-01,BC-01 [--stagger-ms 2000]: sync makers ONE AT A TIME. */
+/**
+ * makers:status --slots AB-01,BC-01 [--stagger-ms 2000]: sync makers ONE AT A TIME. Per maker:
+ * addresses (and whether the SDK agrees), NIGHT with each UTxO's DUST-registration flag, DUST,
+ * shielded balances per colour (`balanceRow`).
+ */
 const makersStatus: Command = async (flags) => {
   const makers = readMakersFile(resolve(flag(flags, "makers-file", defaultMakersFile())!));
   const wanted = flag(flags, "slots", "all")!;
@@ -217,12 +221,7 @@ const makersStatus: Command = async (flags) => {
           shielded: sdk.shieldedAddress === expected.shieldedAddress,
           dust: sdk.dustAddress === expected.dustAddress,
         },
-        night: balances.night,
-        nightUtxos: balances.nightUtxos.length,
-        dust: balances.dust,
-        shielded: Object.fromEntries(
-          Object.entries(balances.shielded).map(([colour, value]) => [colour, { value, coins: balances.shieldedCoins[colour] ?? 0 }]),
-        ),
+        ...balanceRow(balances),
       });
     } finally {
       await session.close().catch(() => undefined);

@@ -8,6 +8,10 @@
  * - Inventory mint: 00052's contract path (`src/providers.ts`, `scripts/mint.ts`):
  *   `submitCallTx(mint(self, amount, nonce))` on the give token's contract, fees from the
  *   maker's DUST (fee margin 5).
+ * - Both submissions wait for the node's `Finalized` notice under a 15-min deadline. If the
+ *   deadline passes after the transaction reached the node, the indexer is asked about it
+ *   before an error is reported (P12, `tx-lookup.ts`): included with `SUCCESS` counts as done,
+ *   with a note that the finalization notice was missing.
  *
  * @module
  */
@@ -18,9 +22,12 @@ import * as ledger from "@midnightntwrk/ledger-v9";
 import type { MakerOps, MakerStatus } from "./makers.ts";
 import type { WalletNetwork } from "./network.ts";
 import { compiledContractFor, tokenProviders } from "./providers.ts";
-import { withTimeout } from "./scheduler.ts";
 import { bytesOfHex, hexOf, type TokenId } from "./tokens.ts";
+import { lookupTransaction, submitWithIndexerFallback } from "./tx-lookup.ts";
 import { WalletSession } from "./wallet-session.ts";
+
+/** The note a result carries when only the indexer confirmed the transaction. */
+export const MISSED_FINALIZED_NOTE = "the node's Finalized notice never arrived; the indexer shows the transaction with SUCCESS";
 
 export interface OpenMakerOptions {
   readonly network: WalletNetwork;
@@ -31,6 +38,8 @@ export interface OpenMakerOptions {
   readonly contractAddress: string;
   readonly log: (line: string) => void;
   readonly registrationTimeoutMs?: number;
+  /** Deadline for proving + submitting + finalization of one registration or mint [15 min]. */
+  readonly submitTimeoutMs?: number;
 }
 
 export const openMakerOps = async (options: OpenMakerOptions): Promise<MakerOps> => {
@@ -73,20 +82,45 @@ export const openMakerOps = async (options: OpenMakerOptions): Promise<MakerOps>
         session.signData(data),
       );
       if (recipe.type !== "UNPROVEN_TRANSACTION") throw new Error(`unexpected DUST registration recipe ${recipe.type}`);
-      // Audit C6 (verification): proving and submission of the registration have a deadline.
-      const txId = await withTimeout(
-        (async () => session.facade.submitTransaction(await session.facade.finalizeRecipe(recipe)))(),
-        15 * 60_000,
-        "DUST registration",
+      // Audit C6 (verification): proving and submission of the registration have a deadline;
+      // P12: a missed Finalized notice is checked against the indexer before it is an error.
+      let submitted: string | undefined;
+      const outcome = await submitWithIndexerFallback(
+        async () => {
+          const finalized = await session.facade.finalizeRecipe(recipe);
+          submitted = finalized.identifiers().at(-1);
+          return await session.facade.submitTransaction(finalized);
+        },
+        {
+          timeoutMs: options.submitTimeoutMs ?? 15 * 60_000,
+          label: "DUST registration",
+          identifier: () => submitted,
+          lookup: (identifier) => lookupTransaction(options.network.indexerHttpUrl, { identifier }),
+          log: options.log,
+        },
       );
-      return { txId: String(txId) };
+      if (outcome.indexed !== undefined) {
+        return { txId: submitted!, txHash: outcome.indexed.hash, blockHeight: outcome.indexed.blockHeight, note: MISSED_FINALIZED_NOTE };
+      }
+      return { txId: String(outcome.value) };
     },
     async holdsCoin(nonce: string) {
       const state = await session.caughtUp();
       return WalletSession.ownedNonces(state).has(nonce.toLowerCase());
     },
     async mintGive(amount: bigint, nonceHex: string) {
-      const providers = tokenProviders(options.giveToken, options.network, session as never, options.log);
+      // The wallet as midnight-js sees it, recording the identifier of the transaction it
+      // hands to the node (P12: needed to look the mint up if Finalized never arrives).
+      let submitted: string | undefined;
+      const wallet = {
+        identity: session.identity,
+        balanceTx: (tx: ledger.Transaction<ledger.SignatureEnabled, ledger.Proof, ledger.PreBinding>, ttl?: Date) => session.balanceTx(tx, ttl),
+        submitTx: (tx: ledger.FinalizedTransaction) => {
+          submitted = tx.identifiers().at(-1);
+          return session.submitTx(tx);
+        },
+      };
+      const providers = tokenProviders(options.giveToken, options.network, wallet as never, options.log);
       const compiledContract = await compiledContractFor(options.giveToken);
       const recipient = {
         is_left: true,
@@ -95,12 +129,34 @@ export const openMakerOps = async (options: OpenMakerOptions): Promise<MakerOps>
       };
       const nonce = bytesOfHex(nonceHex);
       if (nonce.length !== 32) throw new Error("mint nonce must be 32 bytes");
-      const result = (await withTimeout(submitCallTx(providers as never, {
-        compiledContract,
-        contractAddress: options.contractAddress,
-        circuitId: "mint",
-        args: [recipient, amount, nonce],
-      } as never), 15 * 60_000, "inventory mint")) as { public: FinalizedTxData; private: { result: { nonce: Uint8Array; color: Uint8Array; value: bigint } } };
+      const outcome = await submitWithIndexerFallback(
+        () =>
+          submitCallTx(providers as never, {
+            compiledContract,
+            contractAddress: options.contractAddress,
+            circuitId: "mint",
+            args: [recipient, amount, nonce],
+          } as never) as Promise<{ public: FinalizedTxData; private: { result: { nonce: Uint8Array; color: Uint8Array; value: bigint } } }>,
+        {
+          timeoutMs: options.submitTimeoutMs ?? 15 * 60_000,
+          label: "inventory mint",
+          identifier: () => submitted,
+          lookup: (identifier) => lookupTransaction(options.network.indexerHttpUrl, { identifier }),
+          log: options.log,
+        },
+      );
+      if (outcome.indexed !== undefined) {
+        // Included with SUCCESS: the mint circuit's coin nonce is the call nonce (00052 P4),
+        // so the record and a later `holdsCoin` check use the same value.
+        return {
+          txHash: outcome.indexed.hash,
+          blockHeight: outcome.indexed.blockHeight,
+          status: "SucceedEntirely",
+          coinNonce: nonceHex.toLowerCase(),
+          note: MISSED_FINALIZED_NOTE,
+        };
+      }
+      const result = outcome.value!;
       const coin = result.private.result;
       if (hexOf(coin.color) !== options.giveColour) throw new Error(`minted colour ${hexOf(coin.color)} != ${options.giveColour}`);
       return {

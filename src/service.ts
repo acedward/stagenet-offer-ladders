@@ -39,6 +39,16 @@ const env = (name: string): string | undefined => {
   return value === undefined || value === "" ? undefined : value;
 };
 
+/**
+ * Default `ROOT_WINDOW_MINUTES` (P12): 14 days. Ledger 9, which stagenet runs (protocol
+ * 2000000), keeps zswap Merkle roots for `global_ttl` = 1,209,600 s, so an offer built on a
+ * root stays settleable for up to 14 days. (Ledger 7/8 hard-coded a 1-hour window; the
+ * original "re-send hourly" plan assumed that.) The bound only ever delays a rebuild: a coin
+ * is re-offered when the kernel says the old offer is expired or consumed, or when the kernel
+ * no longer lists it and this bound has passed.
+ */
+export const DEFAULT_ROOT_WINDOW_MINUTES = 20_160;
+
 const num = (name: string, fallback: number, min = 0): number => {
   const raw = env(name);
   if (raw === undefined) return fallback;
@@ -189,7 +199,7 @@ export const loadServiceConfig = (overrides: { ladderFile?: string; zswapApi?: s
       includeNonces: ladders.includeNonces ? new Set(ladders.includeNonces) : undefined,
       maxBuildsPerTick: maxBuilds === 0 ? Number.POSITIVE_INFINITY : maxBuilds,
       outboxRetentionMs: num("OUTBOX_RETENTION_HOURS", 168) * 3_600_000,
-      rootWindowMs: num("ROOT_WINDOW_MINUTES", 60, 1) * 60_000,
+      rootWindowMs: num("ROOT_WINDOW_MINUTES", DEFAULT_ROOT_WINDOW_MINUTES, 1) * 60_000,
       submitConfirmMs: num("SUBMIT_CONFIRM_SECONDS", 300, 1) * 1000,
       buildTimeoutMs: num("BUILD_TIMEOUT_SECONDS", 300, 1) * 1000,
       versionCheckEveryTicks: num("VERSION_CHECK_EVERY_TICKS", 10),

@@ -11,8 +11,8 @@ It holds two pieces of work, each delivered as its own pull request:
    deployment record (addresses, colours, transactions). The tokens are **open-mint test
    tokens**: anyone can mint any amount. They have no value.
 2. **Offer ladders.** A service that keeps ladders of valid Offer Files in the Offer Files
-   kernel, `+stkA → −stkB` and `+stkB → −stkC`, and re-sends them on a schedule. It uses
-   the tokens above.
+   kernel, `+stkA → −stkB` and `+stkB → −stkC`, and rebuilds each one when the old one is
+   provably dead (on stagenet: after 14 days, see "Root window"). It uses the tokens above.
 
 ## stkA / stkB / stkC on stagenet
 
@@ -261,6 +261,16 @@ against a real kernel) has not run yet. Do it in stages:
   window; the service rebuilds on a coin only when the kernel says the offer is expired or
   consumed, or no longer lists it and the bound has passed. An unknown status never frees a
   coin.
+  - **Stagenet: `ROOT_WINDOW_MINUTES=20160`** (the default, and in `.env.example`). Stagenet
+    runs ledger 9, which keeps zswap Merkle roots for `global_ttl` = 1,209,600 s = **14
+    days**, so an offer stays settleable for up to 14 days after it is built.
+  - The original "re-send the offers hourly" plan assumed ledger 7/8's 1-hour window. With
+    14 days there is nothing to re-send each hour: the kernel keeps an offer listed until it
+    expires (or is taken), and if the kernel stops listing an offer early, the service
+    re-posts the **same** stored blob (no rebuild, no second offer on the coin). A coin gets a
+    new offer only after the old one is provably dead. `OFFER_TTL_MINUTES` is bookkeeping.
+  - In outbox mode (no kernel), each stored offer is rebuilt after 14 days plus
+    `EXPIRY_GRACE_SECONDS`.
 - **Version guard**: the service halts (and `/health` fails) when the node's
   `system_version` differs from `EXPECTED_NODE_VERSION` (default `2.0.0-d9729c13`), and also
   while the version cannot be read.
@@ -278,7 +288,7 @@ against a real kernel) has not run yet. Do it in stages:
   process, so a crash re-posts the same offer instead of building a second one. Slot states:
   `stored` (in the outbox) → `submitted` (kernel accepted) → `live` (kernel lists it).
 - An offer is rebuilt only when it is provably dead: the kernel says expired or consumed,
-  or the kernel does not list it and `ROOT_WINDOW_MINUTES` (default 60) plus
+  or the kernel does not list it and `ROOT_WINDOW_MINUTES` (default 20160 = 14 days) plus
   `EXPIRY_GRACE_SECONDS` (default 300, a margin for the root's last-seen time) have passed
   since it was built. In outbox mode (never published) the same bound applies. An unknown
   kernel status never frees a coin.

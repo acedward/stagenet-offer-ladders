@@ -39,18 +39,46 @@ export interface MakerStatus {
 
 export interface MakerOps {
   status(): Promise<MakerStatus>;
-  /** Register the unregistered NIGHT UTxOs; returns the submitted transaction id. */
-  registerDust(): Promise<{ txId: string }>;
+  /**
+   * Register the unregistered NIGHT UTxOs; returns the submitted transaction id. `note` (with
+   * the indexer's hash and block) is set when only the indexer confirmed it (P12).
+   */
+  registerDust(): Promise<{ txId: string; txHash?: string; blockHeight?: number; note?: string }>;
   /**
    * Mint `amount` base units of the give token to self as one coin, with the call nonce
    * `nonce` (64 hex). The minted coin's nonce equals the call nonce (00052 P4), which is
    * what makes a crashed mint reconcilable (audit C8).
    */
-  mintGive(amount: bigint, nonce: string): Promise<{ txHash: string; blockHeight: number; status: string; coinNonce: string }>;
+  mintGive(amount: bigint, nonce: string): Promise<{ txHash: string; blockHeight: number; status: string; coinNonce: string; note?: string }>;
   /** Does the wallet own a coin with this nonce (spendable or pending)? */
   holdsCoin(nonce: string): Promise<boolean>;
   close(): Promise<void>;
 }
+
+/** The balances `makers:status` reports (structurally `WalletSession.balancesOf`'s result). */
+export interface MakerBalances {
+  readonly night: bigint;
+  readonly dust: bigint;
+  readonly nightUtxos: readonly { value: bigint; ctime: string; registeredForDustGeneration: boolean }[];
+  readonly shielded: Readonly<Record<string, bigint>>;
+  readonly shieldedCoins: Readonly<Record<string, number>>;
+}
+
+/**
+ * The public balance part of a `makers:status` row (P12, questions-file Q9): NIGHT with each
+ * UTxO's value, creation time and DUST-registration flag, the count of registered UTxOs, the
+ * DUST balance, and the shielded balance and coin count per colour.
+ */
+export const balanceRow = (balances: MakerBalances) => ({
+  night: balances.night,
+  nightUtxos: balances.nightUtxos.length,
+  nightRegistered: balances.nightUtxos.filter((u) => u.registeredForDustGeneration).length,
+  nightUtxoDetail: balances.nightUtxos.map((u) => ({ value: u.value, ctime: u.ctime, registeredForDustGeneration: u.registeredForDustGeneration })),
+  dust: balances.dust,
+  shielded: Object.fromEntries(
+    Object.entries(balances.shielded).map(([colour, value]) => [colour, { value, coins: balances.shieldedCoins[colour] ?? 0 }]),
+  ),
+});
 
 export type RegisterDecision = "register" | "skip-no-night" | "skip-already-registered";
 export type MintDecision = "mint" | "skip-already-holds" | "skip-already-minted" | "skip-no-dust";
@@ -121,11 +149,11 @@ export const registerDustAll = (
       const status = await ops.status();
       const decision = registerDecision(status);
       if (decision !== "register") return { slot: maker.slot, action: decision };
-      const { txId } = await ops.registerDust();
+      const registered = await ops.registerDust();
       return {
         slot: maker.slot,
         action: "registered",
-        detail: { txId, utxos: status.nightUtxos.filter((u) => !u.registered).length },
+        detail: { ...registered, utxos: status.nightUtxos.filter((u) => !u.registered).length },
       };
     },
     options,
@@ -143,6 +171,8 @@ export interface MintRecord {
   readonly blockHeight?: number;
   readonly reconciled?: boolean;
   readonly migratedFrom?: string;
+  /** P12: set when only the indexer confirmed the mint (the node's Finalized notice was missed). */
+  readonly note?: string;
 }
 
 export const MINT_RECORDS_VERSION = 2 as const;
@@ -267,7 +297,14 @@ export const mintAll = (
       const minted = await ops.mintGive(target, nonce);
       const detail = { ...minted, amount: target };
       if (minted.status === "SucceedEntirely") {
-        options.onRecord?.(maker.slot, { ...pending, status: "minted", txHash: minted.txHash, blockHeight: minted.blockHeight, at: now().toISOString() });
+        options.onRecord?.(maker.slot, {
+          ...pending,
+          status: "minted",
+          txHash: minted.txHash,
+          blockHeight: minted.blockHeight,
+          at: now().toISOString(),
+          ...(minted.note === undefined ? {} : { note: minted.note }),
+        });
       }
       return { slot: maker.slot, action: minted.status === "SucceedEntirely" ? "minted" : "mint-failed", detail };
     },
