@@ -207,3 +207,16 @@ describe("root window default (ledger 9)", () => {
     expect(loadServiceConfig().scheduler.rootWindowMs).toBe(3_600_000);
   });
 });
+
+describe(".env.example is safe to copy for Docker Compose", () => {
+  test("no KEY=value line carries an inline comment (Compose would read `KEY=   # text` as the value)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const lines = readFileSync(".env.example", "utf8").split("\n");
+    const assignments = lines.filter((line) => /^[A-Z_][A-Z0-9_]*=/u.test(line));
+    expect(assignments.length).toBeGreaterThan(10);
+    for (const line of assignments) expect(line).not.toMatch(/#/u);
+    expect(assignments).toContain("ROOT_WINDOW_MINUTES=20160");
+    expect(assignments).toContain("FRESH_START_ACK=");
+    expect(assignments).toContain("WATCHDOG_SECONDS=");
+  });
+});
