@@ -284,14 +284,21 @@ export class Scheduler {
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
-    if (deps.journal.needsFreshStartAck && !deps.journal.acknowledgeFreshStart(deps.cfg.freshStartAck)) {
-      deps.log({
-        phase: "fresh-start",
-        result: "unacknowledged",
-        token: deps.journal.freshStartToken,
-        detail: "this journal is new: after checking that no earlier offer of these wallets can still be live, start once with FRESH_START_ACK=<token>",
-      });
-    } else if (deps.cfg.freshStartAck !== undefined && deps.cfg.freshStartAck !== "") {
+    const ackSet = deps.cfg.freshStartAck !== undefined && deps.cfg.freshStartAck !== "";
+    if (deps.journal.needsFreshStartAck) {
+      const token = deps.journal.freshStartToken;
+      if (deps.journal.acknowledgeFreshStart(deps.cfg.freshStartAck)) {
+        // P12: the start that consumes the ack says so (it used to log the "not fresh" warning).
+        deps.log({ phase: "fresh-start", result: "acknowledged", token, detail: "remove FRESH_START_ACK from the environment before the next start" });
+      } else {
+        deps.log({
+          phase: "fresh-start",
+          result: "unacknowledged",
+          token,
+          detail: "this journal is new: after checking that no earlier offer of these wallets can still be live, start once with FRESH_START_ACK=<token>",
+        });
+      }
+    } else if (ackSet) {
       deps.log({ phase: "fresh-start", result: "warning", detail: "FRESH_START_ACK is set but the journal is not fresh: remove it from the environment" });
     }
     for (const slot of deps.slots) deps.journal.ensureSlot(slot);

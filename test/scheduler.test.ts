@@ -755,9 +755,16 @@ describe("third audit pass", () => {
     const probe = openJournal({ file, networkId: "stagenet", mode: "single-wallet-pinned" });
     const token = probe.freshStartToken!;
     expect(token).toMatch(/^fresh-[0-9a-f]{8}$/);
-    const { scheduler } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), config: { freshStartAck: token }, journalFile: file });
+    const { scheduler, logs } = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), config: { freshStartAck: token }, journalFile: file });
     expect(await scheduler.runTick()).toMatchObject({ built: 1 });
     expect(scheduler.deps.journal.needsFreshStartAck).toBe(false);
+    // P12: the acknowledging start logs `acknowledged` (with the token), not the "not fresh" warning.
+    const fresh = logs.filter((l) => l["phase"] === "fresh-start");
+    expect(fresh.map((l) => l["result"])).toEqual(["acknowledged"]);
+    expect(fresh[0]!["token"]).toBe(token);
+    // A later start with the ack still set gets the warning.
+    const again = rig({ wallets: [wallet], slots: testSlots(() => "funding").slice(0, 1), config: { freshStartAck: token }, journalFile: file });
+    expect(again.logs.filter((l) => l["phase"] === "fresh-start").map((l) => l["result"])).toEqual(["warning"]);
   });
 });
 
