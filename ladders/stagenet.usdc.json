@@ -16,7 +16,7 @@
     },
     "wUSDC": {
       "decimals": 6,
-      "colour": "PENDING: fill in from AA 00037 P7 (deployments/stagenet-vault.json, bridgedTokens wUSDC)",
+      "colour": "e5afe273bcb1252cfbc81ad6ca1caaafe22312c8c29f9b104a2fe3ead980bb2d",
       "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238" }
     }
   },

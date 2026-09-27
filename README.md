@@ -397,8 +397,8 @@ unchanged) or a **book** side:
   - A token with `"bridge": {"vault", "erc20"}` must carry exactly
     `tokenType(vaultTokenDomainSeparator(erc20), vault)`; every command that loads the file
     checks this (`src/bridge.ts`).
-  - A colour that starts with `PENDING` is refused with a "fill it in" error. That is how the
-    wUSDC colour waits for AA 00037's record.
+  - A colour that starts with `PENDING` is refused with a "fill it in" error, so a token that is
+    not bridged yet can sit in a file without being quoted by mistake.
 
 ### Canonical addresses
 
@@ -406,7 +406,7 @@ unchanged) or a **book** side:
 |---|---|
 | wStkA colour (bridged stkA) | `5eb2a3cebb2ebe7ba910c78f62c9e28e0d74acbd00c810730def3578860e6a02` |
 | wStkB colour (bridged stkB) | `e7ca18cb056477a5aca5cce387306d56526c2f226b4a4e34f068e3a3e8179588` |
-| wUSDC colour (bridged Circle USDC) | from AA 00037 P7's record, `deployments/stagenet-vault.json` in [acedward/passport PR #4](https://github.com/acedward/passport/pull/4); pending in this file until recorded |
+| wUSDC colour (bridged Circle USDC) | `e5afe273bcb1252cfbc81ad6ca1caaafe22312c8c29f9b104a2fe3ead980bb2d` |
 | Bridge vault (Midnight stagenet, AA 00037) | `7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637` |
 | Vault's EVM account (Sepolia, chain 11155111) | `0x648216975e722494bFF92E88FFc68C8F8d438FaA` |
 | stkA ERC20 (Sepolia, 6 decimals) | `0x2Ab7BE0769e3BBD5c7d047B422CB383fCC06FB52` |
@@ -428,9 +428,11 @@ Run the commands from the repository directory. `scripts/ladder-run.sh` mounts
 `~/.stagenet-offer-ladders`, and the funding mnemonic file by path only
 (`FUNDING_WALLET_FILE_HOST`).
 
-1. **wUSDC colour.** Once AA 00037 has recorded wUSDC, put its colour into
-   `tokens.wUSDC.colour` and run `bun test test/book.test.ts`. The file is refused if the colour
-   is not the vault's colour for Circle USDC.
+1. **Colours.** All three colours are the ones AA 00037 recorded
+   (`deployments/stagenet-vault.json` in
+   [acedward/passport PR #4](https://github.com/acedward/passport/pull/4)), and every load of the
+   file checks them against the vault derivation. A new bridged token goes in with its recorded
+   colour and its `bridge` block; `bun test test/book.test.ts` checks it.
 2. **Funding plan (no wallet opened):**
 
    ```sh
