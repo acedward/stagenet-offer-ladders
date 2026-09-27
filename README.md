@@ -2,7 +2,7 @@
 
 Test market tooling for the Offer Files kernel on Midnight **stagenet**.
 
-It holds two pieces of work, each delivered as its own pull request:
+It holds these pieces of work:
 
 1. **stkA / stkB / stkC test tokens.** Three shielded tokens, each an instance of the
    reference `NativeShieldedToken` contract from
@@ -13,6 +13,9 @@ It holds two pieces of work, each delivered as its own pull request:
 2. **Offer ladders.** A service that keeps ladders of valid Offer Files in the Offer Files
    kernel, `+stkA → −stkB` and `+stkB → −stkC`, and rebuilds each one when the old one is
    provably dead (on stagenet: after 14 days, see "Root window"). It uses the tokens above.
+3. **Stock/USDC books** (project 00057, same PR as 2). The same service quotes wStkA/wUSDC and
+   wStkB/wUSDC on both sides at cent prices, with the tokens bridged from Sepolia (AA 00037).
+   The 20 existing maker wallets are reused. See "Stock/USDC books" below.
 
 ## stkA / stkB / stkC on stagenet
 
@@ -218,7 +221,8 @@ are in `ladders/makers.stagenet.public.json`.
 | `wallets:addresses` / `wallets:check` | write / verify the public addresses file |
 | `makers:status [--slots …]` | sync makers one at a time; NIGHT, DUST, shielded balances |
 | `makers:register-dust [--slots …]` | register NIGHT for DUST generation |
-| `makers:mint [--slots …] [--inventory-offers 10]` | self-mint the inventory coin |
+| `makers:mint [--slots …] [--inventory-offers 10]` | self-mint the inventory coin (00053 grid ladders) |
+| `makers:fund --ladder-file … [--dry-run] [--batch-size 5] [--check-balances]` | send each book maker its inventory from the funding wallet (00057) |
 | `ladder:once` / `ladder:run` | one reconcile tick / the service loop (SIGTERM stops after the current slot) |
 | `offers:verify` | decode the current offers and check them against the journal and the grid |
 | `offers:inspect --offer-id …` | decode one stored offer |
@@ -343,6 +347,165 @@ stays unreadable.
   `~/.stagenet-offer-ladders/funding.lock` (00052's `src/state.ts`). Set
   `FUNDING_LOCK_HELD=true` only when an operator already holds the lock.
 - Unit tests: `bun test` (no network).
+
+## Stock/USDC books (project 00057)
+
+The service quotes two stock/USDC markets on both sides, at cent prices (about 100 stocks
+per USDC, mid 0.0100). The book is `ladders/stagenet.usdc.json`:
+
+| Pair | Side | Ladder | Maker gives → wants | Levels (USDC per stock) | Size per offer | Each maker holds | Makers |
+|---|---|---|---|---|---|---|---|
+| wStkA/wUSDC | ask (a taker buys A) | `AASK` | wStkA → wUSDC | 0.0104, 0.0108, 0.0112, 0.0116, 0.0120 | 100 wStkA (1.04–1.20 wUSDC) | 1,000 wStkA (10 fills) | AB-01…05 |
+| wStkA/wUSDC | bid (a taker sells A) | `ABID` | wUSDC → wStkA | 0.0096, 0.0092, 0.0088, 0.0084, 0.0080 | 1 wUSDC (104.17–125 wStkA) | 2 wUSDC (2 fills) | AB-06…10 |
+| wStkB/wUSDC | ask | `BASK` | wStkB → wUSDC | as for A | 100 wStkB | 1,000 wStkB | BC-01…05 |
+| wStkB/wUSDC | bid | `BBID` | wUSDC → wStkB | as for A | 1 wUSDC | 2 wUSDC | BC-06…10 |
+
+- The best ask is 0.0104 and the best bid 0.0096 on both pairs (8 % spread). Slot `AASK-01` is
+  the best ask and `ABID-01` the best bid.
+- Makers receive in total 5,000 wStkA, 5,000 wStkB and 20 wUSDC.
+- The makers' native stkA/stkB coins stay unused: a slot only ever pins a coin of its give
+  colour.
+- After fills, ask makers accumulate wUSDC and bid makers accumulate wStk. Those proceeds are
+  not offered, and a maker whose give inventory runs out is `depleted` (not an error).
+
+### Book ladders in the ladder file
+
+A ladder entry is either a **grid** (`give`, `want`, `mid`, `spread`, `levels`; 00053,
+unchanged) or a **book** side:
+
+```json
+{ "id": "ABID", "side": "bid", "base": "wStkA", "quote": "wUSDC",
+  "prices": ["0.0096", "0.0092", "0.0088", "0.0084", "0.0080"],
+  "giveTokens": "1", "inventoryTokens": "2",
+  "wallets": ["AB-06", "AB-07", "AB-08", "AB-09", "AB-10"] }
+```
+
+- **`prices`** are exact decimals in quote per base, best level first: asks strictly rising,
+  bids strictly falling.
+- **Orientation**:
+  - an `ask` gives `giveTokens` of base for `ceil(give × price)` of quote;
+  - a `bid` gives `giveTokens` of quote for `ceil(give / price)` of base.
+
+  Both round up, so a maker never trades beyond its level. The bid want amounts are
+  104,166,667 / 108,695,653 / 113,636,364 / 119,047,620 / 125,000,000 base units.
+- **Crossing**: a file whose lowest ask is not above its highest bid, per pair, is refused.
+- **`wallets`** maps each level to a maker wallet id in `makers.json`. By default the wallet id
+  is the slot id, as in 00053. Two slots can never share a wallet.
+- **`inventoryTokens`** is what `makers:fund` sends each maker.
+- **Token colours**:
+  - A token with `"bridge": {"vault", "erc20"}` must carry exactly
+    `tokenType(vaultTokenDomainSeparator(erc20), vault)`; every command that loads the file
+    checks this (`src/bridge.ts`).
+  - A colour that starts with `PENDING` is refused with a "fill it in" error. That is how the
+    wUSDC colour waits for AA 00037's record.
+
+### Canonical addresses
+
+| What | Value |
+|---|---|
+| wStkA colour (bridged stkA) | `5eb2a3cebb2ebe7ba910c78f62c9e28e0d74acbd00c810730def3578860e6a02` |
+| wStkB colour (bridged stkB) | `e7ca18cb056477a5aca5cce387306d56526c2f226b4a4e34f068e3a3e8179588` |
+| wUSDC colour (bridged Circle USDC) | from AA 00037 P7's record, `deployments/stagenet-vault.json` in [acedward/passport PR #4](https://github.com/acedward/passport/pull/4); pending in this file until recorded |
+| Bridge vault (Midnight stagenet, AA 00037) | `7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637` |
+| Vault's EVM account (Sepolia, chain 11155111) | `0x648216975e722494bFF92E88FFc68C8F8d438FaA` |
+| stkA ERC20 (Sepolia, 6 decimals) | `0x2Ab7BE0769e3BBD5c7d047B422CB383fCC06FB52` |
+| stkB ERC20 (Sepolia, 6 decimals) | `0xF2bEFf36543219C8feC2AB2f42070AA65D3C844B` |
+| Circle USDC (Sepolia, 6 decimals) | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
+| Native stkA / stkB / stkC (00052) | contracts and colours in the table at the top (`deployments/stagenet.json`) |
+| Maker public addresses | `ladders/makers.stagenet.public.json` (20 wallets AB-01…10, BC-01…10) |
+
+| Ladder file | What it is for |
+|---|---|
+| `ladders/stagenet.usdc.json` | the 00057 stock/USDC books: 4 ladders × 5 levels on the 20 makers |
+| `ladders/stagenet.json` | the 00053 native grid ladders AB (stkA → stkB) and BC (stkB → stkC); retired by 00057, kept for `makers:mint` / `makers:register-dust` |
+| `ladders/stagenet.stage1.json` | the 00053 staged rollout (3 slots of the grid) |
+| `ladders/stagenet.test.json` | the 00053 single-wallet test ladder (funding wallet, coin pool) |
+
+### Runbook (books)
+
+Run the commands from the repository directory. `scripts/ladder-run.sh` mounts
+`~/.stagenet-offer-ladders`, and the funding mnemonic file by path only
+(`FUNDING_WALLET_FILE_HOST`).
+
+1. **wUSDC colour.** Once AA 00037 has recorded wUSDC, put its colour into
+   `tokens.wUSDC.colour` and run `bun test test/book.test.ts`. The file is refused if the colour
+   is not the vault's colour for Circle USDC.
+2. **Funding plan (no wallet opened):**
+
+   ```sh
+   scripts/ladder-run.sh makers:fund --ladder-file ladders/stagenet.usdc.json --dry-run
+   ```
+
+   It prints, per maker, the wallet, the token, the amount and the decision, and the totals
+   per token.
+3. **Fund the makers** (shielded transfers from the funding wallet; holds `funding.lock`; fee
+   margin 5; batches of 5 makers per token, one transaction each):
+
+   ```sh
+   FUNDING_WALLET_FILE_HOST=/path/to/funding-mnemonic-file \
+     scripts/ladder-run.sh makers:fund --ladder-file ladders/stagenet.usdc.json
+   ```
+
+   - It opens no maker wallet, so it can run while the service holds the makers.
+   - Every transfer is recorded in `state/maker-funding.json`: `pending` with its
+     identifier before it is submitted, `sent` with hash and block after. A second run moves
+     nothing.
+   - A `skip-pending-unresolved` maker (the command exits non-zero) was never confirmed by
+     the indexer. Look the identifier up before `--clear-pending <wallet id>`.
+   - With the service stopped, `--check-balances` also syncs each recipient and skips makers
+     that already hold their inventory.
+   - Balances afterwards: `scripts/ladder-run.sh makers:status --slots AB-01,AB-06` (service
+     stopped) or `/status` inventory (service running on the books).
+4. **Switch the service to the books** (a fresh journal; nothing of the 00053 state is moved
+   or deleted):
+   1. `docker compose down`.
+   2. Archive the state directory:
+      `cp -a ~/.stagenet-offer-ladders/state ~/.stagenet-offer-ladders/state-archive-o53-$(date -u +%Y%m%dT%H%M%SZ)`.
+   3. In `.env` set:
+
+      ```
+      LADDER_FILE=ladders/stagenet.usdc.json
+      JOURNAL_FILE=/data/ladder.books.journal.json
+      OUTBOX_DIR=/data/outbox-books
+      ```
+
+      and a new `IMAGE_TAG`. The book needs its own journal. A start on the 00053 journal is
+      refused, because that journal still holds offers for slots the book does not have.
+   4. `docker compose up -d --build`, then follow the fresh-start acknowledgement in the
+      runbook above: the first start prints `fresh-xxxxxxxx`; set `FRESH_START_ACK` to it, start
+      again, then empty it and start once more.
+   5. To go back, restore the previous `.env` values. The 00053 journal and outbox are where
+      they were.
+5. **Verify** without touching the live journal:
+
+   ```sh
+   mkdir -p ~/.stagenet-offer-ladders/verify-copy
+   cp -R ~/.stagenet-offer-ladders/state/ladder.books.journal.json \
+     ~/.stagenet-offer-ladders/state/outbox-books ~/.stagenet-offer-ladders/verify-copy/
+   STATE_SUBDIR=verify-copy JOURNAL_FILE=/data/ladder.books.journal.json OUTBOX_DIR=/data/outbox-books \
+     scripts/ladder-run.sh offers:verify --ladder-file ladders/stagenet.usdc.json
+   ```
+
+   It prints PASS or FAIL, and checks:
+   - every offer's legs against its level;
+   - every journal slot's wallet, colours and amounts against the book;
+   - per pair (`books`), the best bid and best ask, which must not cross, and the depth.
+
+   `/status` shows the same `books` summary live, plus each slot's `side`, `pair` and `price`.
+6. **Take an offer as a taker** (test; the funding wallet pays with a pinned coin of the
+   offer's want colour). Coin nonces come from `funding:status`. `offers:settle` takes
+   `service.lock`, so while the service runs it reads a **fresh** copy of the state: make the
+   copy again as in step 5 first, then:
+
+   ```sh
+   FUNDING_WALLET_FILE_HOST=/path/to/funding-mnemonic-file STATE_SUBDIR=verify-copy \
+     JOURNAL_FILE=/data/ladder.books.journal.json OUTBOX_DIR=/data/outbox-books \
+     scripts/ladder-run.sh offers:settle --ladder-file ladders/stagenet.usdc.json --slot AASK-01 --pay-with <wUSDC coin nonce>
+   ```
+
+   Buying `AASK-01` pays 1.04 wUSDC for 100 wStkA. Selling into `ABID-01` pays 104.166667
+   wStkA for 1 wUSDC. The running service sees the maker's coin spent, marks the slot
+   `consumed` and re-offers from the change coin within a reconcile interval.
 
 ## License
 
