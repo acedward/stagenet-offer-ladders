@@ -70,6 +70,7 @@ holds public data only).
 | `contracts/` | Compact sources and their compiled `managed/` artefacts |
 | `scripts/` | Command-line tools (deploy, mint, checks) |
 | `src/` | Shared library code (wallet, providers, service) |
+| `e2e/` | Local end-to-end test of the stock/USDC books on an `undeployed` devnet |
 
 ## Runtime
 
@@ -506,6 +507,35 @@ Run the commands from the repository directory. `scripts/ladder-run.sh` mounts
    Buying `AASK-01` pays 1.04 wUSDC for 100 wStkA. Selling into `ABID-01` pays 104.166667
    wStkA for 1 wUSDC. The running service sees the maker's coin spent, marks the slot
    `consumed` and re-offers from the change coin within a reconcile interval.
+
+### Local end-to-end (`e2e/local-books.sh`)
+
+The same flow runs on a throwaway local chain in Docker: `e2e/local-books.sh` (about 10
+minutes; everything it writes goes to a temporary run directory, printed at the end). The
+stack is `e2e/compose.local.yml`, run under a unique project name, with host ports on
+127.0.0.1 ≥ 10000. It has:
+
+- node `midnight-node` 2.0.0-rc.4, `CFG_PRESET=dev` (the same `2.0.0-d9729c13` build as
+  stagenet);
+- indexer 4.4.0-rc.3 (the `midnight-2-offers/indexer:local` image, built from the
+  effectstream/binaries 0.3.120 executable);
+- proof server rc.6;
+- the service from this checkout.
+
+Nothing is pulled: the images must be local.
+
+The run:
+
+1. The funding wallet is Midnight's public dev test wallet, prefunded by the dev genesis. It
+   deploys this repository's stkA and stkB contracts as stand-in wStkA and wUSDC, and mints
+   to itself.
+2. Four throwaway makers receive their inventory through `makers:fund`. A second run moves
+   nothing, and `--check-balances` finds every maker funded.
+3. The service stores the committed book's first two ask and bid levels (fresh-start ack),
+   and `offers:verify` passes.
+4. A taker buys `AASK-01` and sells into `ABID-01` with exact balance deltas.
+5. Both slots re-offer from their change, and a restart builds nothing.
+6. The stack is removed with `down -v`.
 
 ## License
 
