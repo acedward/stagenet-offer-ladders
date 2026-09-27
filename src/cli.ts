@@ -11,9 +11,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-import { MidnightBech32m } from "@midnightntwrk/wallet-sdk-address-format";
+import { MidnightBech32m, ShieldedAddress } from "@midnightntwrk/wallet-sdk-address-format";
 
 import { buildPublicMakers, checkMakers, type PublicMakersFile, renderPublicMakersMarkdown } from "./addresses.ts";
+import { fundMakers, type FundingPorts, loadFundingRecords, planFunding, serializeFundingRecords, type TransferRecord } from "./funding.ts";
+import { openFunderOps } from "./funding-ops.ts";
 import { readLadderFile } from "./ladder.ts";
 import { fetchLedgerParameters, fetchNodeVersion, stagenet } from "./network.ts";
 import { inspectOffer } from "./offer-inspect.ts";
@@ -27,6 +29,7 @@ import { balanceRow, loadMintRecords, type MintRecord, mintAll, registerDustAll,
 import { redact, redactDeep } from "./redact.ts";
 import { settleOffer } from "./settle.ts";
 import type { TokenId } from "./tokens.ts";
+import { lookupTransaction } from "./tx-lookup.ts";
 import { verifyCurrentOffers } from "./verify.ts";
 import { WalletSession } from "./wallet-session.ts";
 import {
@@ -595,6 +598,114 @@ const makersMint: Command = async (flags) => {
 };
 
 /**
+ * makers:fund [--ladder-file f] [--public-json ladders/makers.stagenet.public.json] [--dry-run]
+ *   [--batch-size 5] [--slots AASK-01,…] [--check-balances] [--clear-pending <wallet id>]
+ *
+ * (00057 FR-003) Send each book maker its give inventory (`inventoryTokens` of its ladder)
+ * from the FUNDING wallet by shielded transfer, batched per colour. Recipients' shielded
+ * addresses come from the public makers file; no maker secret is read, so it can run next
+ * to the service. Records (public) in $STATE_DIR/maker-funding.json make it idempotent:
+ * `sent` makers are skipped, `pending` ones are resolved on the indexer and never re-sent
+ * blindly. `--dry-run` opens no wallet. `--check-balances` also syncs each recipient (one at
+ * a time, under service.lock: the service must be stopped) and skips makers that already
+ * hold their inventory. Holds funding.lock; fee margin 5; prints public data only.
+ */
+const makersFund: Command = async (flags) => {
+  const ladderFile = flag(flags, "ladder-file");
+  const config = loadServiceConfig(ladderFile === undefined ? {} : { ladderFile });
+  if (config.mode !== "wallet-per-slot") throw new Error("makers:fund funds maker wallets: the ladder file must be in wallet-per-slot mode");
+  const dryRun = flags["dry-run"] === true;
+  const batchSize = Number(flag(flags, "batch-size", "5"));
+  const publicPath = flag(flags, "public-json", DEFAULT_PUBLIC_JSON)!;
+  const published = JSON.parse(readFileSync(publicPath, "utf8")) as PublicMakersFile;
+  if (published.networkId !== config.network.networkId) throw new Error(`${publicPath} is for ${published.networkId}, the network is ${config.network.networkId}`);
+  const addresses = new Map(published.makers.map((m) => [m.slot, m.shieldedAddress]));
+  const wanted = flag(flags, "slots");
+  const slots = wanted === undefined ? config.slots : config.slots.filter((s) => wanted.split(",").map((w) => w.trim()).includes(s.slot));
+  if (slots.length === 0) throw new Error(`no slot matches --slots ${wanted}`);
+  const targets = planFunding(slots, config.ladders, (walletId) => {
+    const address = addresses.get(walletId);
+    // Every recipient address must be a shielded address of THIS network before anything moves.
+    if (address !== undefined) MidnightBech32m.parse(address).decode(ShieldedAddress, config.network.networkId);
+    return address;
+  });
+  if (targets.length === 0) throw new Error(`no ladder in ${config.ladderFile} names inventoryTokens`);
+
+  const recordFile = `${stateDirectory()}/maker-funding.json`;
+  const present = existsSync(recordFile);
+  const records: Record<string, TransferRecord> = loadFundingRecords(present ? JSON.parse(readFileSync(recordFile, "utf8")) : undefined, present, config.network.networkId);
+  const persist = (): void => {
+    mkdirSync(dirname(recordFile), { recursive: true });
+    writeAtomic(recordFile, serializeFundingRecords(records, config.network.networkId)); // durable before the next step
+  };
+  const clear = flag(flags, "clear-pending");
+  if (clear !== undefined) {
+    const keys = Object.keys(records).filter((k) => records[k]!.walletId === clear && records[k]!.status === "pending");
+    if (keys.length === 0) throw new Error(`${clear} has no pending transfer`);
+    log(`clearing ${clear}'s pending transfer(s) ${keys.map((k) => records[k]!.txId.slice(0, 16)).join(", ")}…: only after finding no such transaction on the indexer`);
+    for (const k of keys) delete records[k];
+    persist();
+  }
+  const run = async (): Promise<number> => {
+    const ports: FundingPorts = {
+      lookup: (identifier) => lookupTransaction(config.network.indexerHttpUrl, { identifier }),
+      openFunder: async () => {
+        const { height, parameters } = await fetchLedgerParameters(config.network);
+        log(`ledger parameters from block ${height}; opening the funding wallet`);
+        return await openFunderOps({
+          network: config.network,
+          dustParameters: parameters.dust,
+          mnemonic: readMnemonicFile(config.fundingWalletFile),
+          log: (line) => log(`funder: ${line}`),
+        });
+      },
+    };
+    if (flags["check-balances"] === true) {
+      const makers = readMakersFile(resolve(flag(flags, "makers-file", config.makersFile)!));
+      const { parameters } = await fetchLedgerParameters(config.network);
+      ports.makerBalance = async (walletId, colour) => {
+        const maker = makers.makers.find((m) => m.slot === walletId);
+        if (maker === undefined) throw new Error(`no maker wallet ${walletId} in the secrets file`);
+        const session = await WalletSession.open({
+          network: config.network,
+          mnemonic: maker.mnemonic,
+          dustParameters: parameters.dust,
+          syncTimeoutMs: 20 * 60 * 1000,
+          log: (line) => log(`${walletId}: ${line}`),
+        });
+        try {
+          const state = await session.synced();
+          return WalletSession.spendableCoins(state).filter((c) => c.type === colour).reduce((sum, c) => sum + c.value, 0n);
+        } finally {
+          await session.close().catch(() => undefined);
+        }
+      };
+    }
+    const report = await fundMakers(targets, ports, {
+      batchSize,
+      dryRun,
+      records,
+      onRecord: (key, record) => {
+        records[key] = record;
+        persist();
+      },
+      log,
+    });
+    printResult({ networkId: config.network.networkId, ladderFile: config.ladderFile, recordFile, ...report });
+    return report.results.some((r) => ["error", "not-sent", "skip-pending-unresolved"].includes(r.action)) ? 1 : 0;
+  };
+  const withMakers = (fn: () => Promise<number>) => (flags["check-balances"] === true ? withServiceLock("makers:fund --check-balances", fn) : fn());
+  if (dryRun) return await withMakers(run);
+  await requirePinnedNode();
+  const lock = fundingLock("00057 makers:fund");
+  try {
+    return await withMakers(run);
+  } finally {
+    lock.release();
+  }
+};
+
+/**
  * slots:unhalt <slot> [--retire] (audit F-A21): recover a halted slot. Without --retire the
  * slot goes back to `submitted` with its offer and coin claim kept (re-verified next tick);
  * with --retire the operator confirms the old offer is dead and the coin is freed.
@@ -631,6 +742,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
       await requirePinnedNode();
       return await makersMint(flags);
     }),
+  "makers:fund": makersFund,
   "ladder:once": ladderOnce,
   "ladder:run": ladderRun,
   "offers:inspect": offersInspect,

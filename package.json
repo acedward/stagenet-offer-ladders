@@ -18,6 +18,7 @@
     "makers:status": "bun src/cli.ts makers:status",
     "makers:register-dust": "bun src/cli.ts makers:register-dust",
     "makers:mint": "bun src/cli.ts makers:mint",
+    "makers:fund": "bun src/cli.ts makers:fund",
     "ladder:once": "bun src/cli.ts ladder:once",
     "ladder:run": "bun src/cli.ts ladder:run",
     "offers:settle": "bun src/cli.ts offers:settle"
