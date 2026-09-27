@@ -182,8 +182,30 @@ are in `ladders/makers.stagenet.public.json`.
    (expected `https://stagenet.api-zswap.zkdojo.com`) and register stkA/stkB/stkC there
    (colours in `deployments/stagenet.json`). With `ZSWAP_API` empty the service runs in
    **outbox mode**: offers are built and stored in `state/outbox/`, not posted.
-6. **Run**: `cp .env.example .env`, edit, then `docker compose up -d`. Check
-   `curl http://127.0.0.1:18080/status` (slot table) and `/health`.
+6. **Run** (from the repository directory):
+   - `cp .env.example .env`, then edit it: `LADDER_FILE`, `LADDER_MEM_LIMIT` (2g is enough
+     for 20 makers, see below) and a free `STATUS_HOST_PORT`. Keep comments on their own
+     lines (Compose reads `KEY=   # text` as the value `# text`).
+   - `docker compose up -d`. The first start of a new journal builds nothing and `/health`
+     answers 503; the log and `/status` show a token (`phase=fresh-start
+     result=unacknowledged token=fresh-xxxxxxxx`). Once no earlier offer of these wallets can
+     still be live, set `FRESH_START_ACK=fresh-xxxxxxxx` in `.env` and run `docker compose up
+     -d` again (the log says `result=acknowledged`); then set `FRESH_START_ACK=` back to empty
+     and `docker compose up -d` once more.
+   - Status: `curl -s http://127.0.0.1:$STATUS_HOST_PORT/status` (slot table),
+     `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:$STATUS_HOST_PORT/health`,
+     `docker compose ps`, `docker compose logs -f --tail 50 ladder`.
+   - Stop: `docker compose stop` (or `docker compose down`; the journal and outbox are in
+     the host directory and survive both). Start again: `docker compose up -d`.
+   - Check the stored offers without touching the live journal (decodes every current
+     offer and checks it against the journal and the grid; prints PASS or FAIL):
+
+     ```sh
+     mkdir -p ~/.stagenet-offer-ladders/verify-copy
+     cp -R ~/.stagenet-offer-ladders/state/ladder.wallet-per-slot.journal.json \
+       ~/.stagenet-offer-ladders/state/outbox ~/.stagenet-offer-ladders/verify-copy/
+     STATE_SUBDIR=verify-copy scripts/ladder-run.sh offers:verify
+     ```
 
 `scripts/ladder-run.sh` runs any command in `oven/bun:1.3.11` with a proof server
 (rc.6, pinned by digest) and `~/.stagenet-offer-ladders` mounted at `/state`.
@@ -203,18 +225,39 @@ are in `ladders/makers.stagenet.public.json`.
 | `offers:settle --slot AB-02 --pay-with <nonce>` | test taker: settle a stored offer with the funding wallet, paying with a pinned coin |
 | `funding:status` | balances of the funding wallet |
 
-### Before funding all 20 makers: staged rollout (audit C13)
+### Staged rollout (audit C13) — done in outbox mode on 2026-09-27
 
-The production shape (20 facades in one process, the change-returning path, kernel mode
-against a real kernel) has not run yet. Do it in stages:
+The production shape runs in stages. Stages 1 and 2 ran on stagenet on 2026-09-27 (plan
+00053 P12), in `wallet-per-slot` **outbox mode** through `docker compose`:
 
-1. Fund 2–3 makers only (for example `AB-01`, `AB-02`, `BC-01`), register DUST, mint.
-2. Run the service in `wallet-per-slot`, **outbox mode**, with a ladder file listing only
-   those slots, for **2+ hours**. Record the process RSS (`docker stats`), the first-tick
-   time, and at least one real change-returning build. Set `LADDER_MEM_LIMIT` from it.
-3. Before relying on kernel mode unattended, run one real post against the stagenet kernel
-   (or FR-006's local devnet + kernel end-to-end) and watch `/status` go `submitted` → `live`.
-4. Then fund the rest and use the full `ladders/stagenet.json`.
+1. **Stage 1: 3 makers** (`ladders/stagenet.stage1.json`: the full ladder with
+   `"onlySlots": ["AB-01", "AB-02", "BC-01"]`, so each slot keeps its full-ladder price and
+   the journal carries over to stage 2). Measured with `LADDER_MEM_LIMIT=4g`:
+   - RSS 387–430 MiB over 67 min (≈ 0.39 GiB before any wallet opens, ≈ 10–17 MiB per open
+     wallet); the proof server uses ≈ 0.7 GiB after its first proof;
+   - first tick 322 s: each wallet's first full sync takes ≈ 105 s, a build ≈ 1.7–1.9 s;
+   - 3 change-returning offers (one input: the maker's 1,000-token coin; +100 given, 900
+     back as change inside the offer; ≈ 15.5 KB each), `offers:verify` PASS at 0.800 /
+     0.844 / 0.800;
+   - the fresh-start ack flow, and restarts without a rebuild (a restart while idle takes
+     the lock at once; after a kill in the middle of a wallet sync, the new process waits
+     ≈ 90–110 s for the old lock to go stale, restarting a few times meanwhile).
+2. **Stage 2: all 20 makers** (`ladders/stagenet.json`, same journal, no reset). Measured
+   with `LADDER_MEM_LIMIT=2g`:
+   - all 20 offers stored **36.5 min** after the start (one wallet sync + build at a time);
+     the three stage-1 offers were kept, not rebuilt;
+   - RSS 362 MiB at start, **≈ 0.71–0.72 GiB** with 20 wallets open: 2g leaves ≈ 2.8×;
+   - `offers:verify` 20/20 PASS: AB at 0.800 … 1.200 (want 80 … 120 stkB), BC the same in
+     stkC.
+3. **Still to do: kernel mode.** Before relying on kernel mode unattended, run one real post
+   against the stagenet kernel (or FR-006's local devnet + kernel end-to-end) and watch
+   `/status` go `submitted` → `live`. Then set `ZSWAP_API` and restart: the stored offers
+   are published as they are (no rebuild).
+
+`Wallet.Sync: [object CloseEvent]` lines with a stack trace in the log are the wallet SDK
+reporting an indexer websocket that closed; the SDK reconnects by itself (exponential
+retry, at most 2 min apart). They need no action unless `/status` shows slots whose wallet
+stays unreadable.
 
 ### Operating rules
 
