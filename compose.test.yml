@@ -1,0 +1,16 @@
+# Single-wallet test mode (the owner's funding wallet): adds the funding wallet file,
+# read-only, and the test ladder. The operator holds funding.lock (in the shared state
+# directory) for the whole run (FUNDING_LOCK_HELD=true). Test only, never unattended: the
+# funding wallet is shared with other projects.
+services:
+  ladder:
+    environment:
+      MODE: single-wallet-pinned
+      LADDER_FILE: ladders/stagenet.test.json
+      FUNDING_WALLET_FILE: /secrets-funding/wallet
+      FUNDING_LOCK_HELD: "true"
+      STK_STATE_DIR: /funding-state
+    volumes:
+      # where 00052's funding.lock lives (read-only: the operator holds the lock)
+      - ${SECRETS_DIR:-~/.stagenet-offer-ladders}:/funding-state:ro
+      - ${FUNDING_WALLET_FILE_HOST:?set FUNDING_WALLET_FILE_HOST to the funding mnemonic file}:/secrets-funding/wallet:ro

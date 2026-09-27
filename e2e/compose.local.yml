@@ -1,0 +1,108 @@
+# Local end-to-end stack for the stock/USDC books (plan 00057 P2). Driven by
+# e2e/local-books.sh, which sets every ${VAR} below, picks free host ports >= 10000 and runs
+# the stack under its own unique project name (never the service's default project):
+#
+#   e2e/local-books.sh            # up, test, down -v
+#
+# - node: midnight-node 2.0.0-rc.4 with CFG_PRESET=dev (`undeployed` genesis; its ledger-9
+#   crate pins are identical to stagenet's 2.0.0-d9729c13, plan 00049). The dev genesis
+#   prefunds Midnight's public test wallet (testkit's TEST_MNEMONIC) with NIGHT and registered
+#   DUST: the harness uses it as the funding wallet and taker. It is valid on this local chain
+#   only.
+# - indexer: indexer-standalone 4.4.0-rc.3, the executable published in effectstream/binaries
+#   0.3.120, as the local image midnight-2-offers builds (images/indexer); the same
+#   environment as that repository's compose/core.yml.
+# - proof-server: 9.0.0-rc.6 by digest, as compose.yml.
+# - ladder: the service from this checkout (mounted read-only, run with oven/bun:1.3.11; no
+#   image build), on the local book, with its own journal/outbox paths as in the P4 runbook.
+#
+# Nothing is pulled (pull_policy: never): the images must already be local. Every host port
+# is bound to 127.0.0.1. All state lives in $E2E_DIR (outside the repository).
+name: ${E2E_PROJECT:?set E2E_PROJECT}
+
+services:
+  node:
+    image: midnightntwrk/midnight-node@sha256:caf93d6f9fb3630c906ef3e714c151655377f3d28f907d17545de1870514da2e
+    pull_policy: never
+    environment:
+      CFG_PRESET: dev
+      SIDECHAIN_BLOCK_BENEFICIARY: 04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e
+      THRESHOLD: "0"
+    volumes:
+      - node-data:/node
+    ports:
+      - "127.0.0.1:${E2E_NODE_PORT:?}:9944"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs -H 'Content-Type: application/json' -d '{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"chain_getBlockHash\",\"params\":[1]}' http://localhost:9944 | grep -q '\"result\":\"0x'"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+      start_period: 120s
+
+  indexer:
+    image: ${E2E_INDEXER_IMAGE:-midnight-2-offers/indexer:local}
+    pull_policy: never
+    depends_on:
+      node:
+        condition: service_healthy
+    environment:
+      RUST_LOG: indexer=info,chain_indexer=info,indexer_api=info,wallet_indexer=info,indexer_common=info,fastrace_opentelemetry=off,info
+      APP__APPLICATION__NETWORK_ID: undeployed
+      APP__APPLICATION__CONCURRENCY_LIMIT: "1"
+      APP__INFRA__STORAGE__MAX_CONNECTIONS: "8"
+      APP__INFRA__NODE__URL: ws://node:9944
+      APP__INFRA__SPO_NODE__URL: ws://node:9944
+      APP__INFRA__SPO_NODE__BLOCKFROST_ID: e2e-not-using-spo
+      APP__INFRA__SPO_NODE__RECONNECT_MAX_DELAY: 24h
+      # Dev-only placeholder required by the indexer (the same public value as midnight-2-offers).
+      APP__INFRA__SECRET: "303132333435363738393031323334353637383930313233343536373839303132"
+    volumes:
+      - indexer-data:/data
+    ports:
+      - "127.0.0.1:${E2E_INDEXER_PORT:?}:8088"
+
+  proof-server:
+    image: midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
+    pull_policy: never
+
+  ladder:
+    image: oven/bun:1.3.11
+    pull_policy: never
+    profiles: ["service"]
+    # As compose.yml: a start refused by a live service.lock (a predecessor killed mid-sync)
+    # retries until the old heartbeat is stale (about 90 s). The grace period lets a stop or
+    # recreate wait for the current slot, so the lock is normally released at once.
+    restart: unless-stopped
+    stop_grace_period: 2m
+    working_dir: /work
+    command: ["bun", "src/cli.ts", "ladder:run", "--ladder-file", "/e2e/book.local.json"]
+    volumes:
+      - ${E2E_REPO:?}:/work:ro
+      - ${E2E_DIR:?}:/e2e
+    environment:
+      MN_NETWORK_ID: undeployed
+      MN_NODE_URL: http://node:9944
+      MN_INDEXER_URL: http://indexer:8088/api/v4/graphql
+      MN_INDEXER_WS_URL: ws://indexer:8088/api/v4/graphql/ws
+      MN_PROOF_SERVER_URL: http://proof-server:6300
+      EXPECTED_NODE_VERSION: ${E2E_NODE_VERSION:?}
+      TOKENS_FILE: /e2e/tokens.json
+      STATE_DIR: /e2e/state
+      JOURNAL_FILE: /e2e/state/ladder.books.journal.json
+      OUTBOX_DIR: /e2e/state/outbox-books
+      MAKERS_FILE: /e2e/secrets/makers.json
+      MAKERS_DIR_CHECK: "false"
+      STK_STATE_DIR: /e2e/funding-state
+      STATUS_PORT: "8080"
+      RECONCILE_SECONDS: "10"
+      WALLET_STAGGER_MS: "1000"
+      FRESH_START_ACK: ${E2E_FRESH_START_ACK:-}
+    ports:
+      - "127.0.0.1:${E2E_STATUS_PORT:?}:8080"
+    depends_on:
+      - indexer
+      - proof-server
+
+volumes:
+  node-data:
+  indexer-data:

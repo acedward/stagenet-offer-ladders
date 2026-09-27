@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// The reference module of MIP-0018, "On-Chain Token Metadata Emission"
+// (MIP PR #325, `mips/mip-0018-on-chain-token-metadata.md` @ `37a3471`, status
+// Proposed). The MIP is the normative text; ../TOKEN-METADATA.md only points at
+// it and records how this repository implements it.
+//
+// One event per (domainSep, kind, key, value) tuple, emitted as the standard
+// library's `Misc` event named `mip-0018:token-metadata[v1]` with a fixed
+// 256-byte payload (MIP section 2):
+//
+//   offset  0  32  domainSep   the token within this contract (ERC-1155 `id`)
+//   offset 32   1  kind        0 unshielded native, 1 shielded native,
+//                              2 unshielded ledger, 3 shielded ledger
+//   offset 33  32  key         key identifier bytes, NUL-padded; a key starting
+//                              with `/metadata/` must be an RFC 6901 pointer
+//   offset 65   1  val-type    0 opaque, 1 UTF-8 string, 2 unsigned integer
+//                              (Compact `Uint<8*val-len>`, 1 <= val-len <= 31),
+//                              3 UTF-8 JSON (ONE complete value), 4 UTF-8
+//                              absolute URI, 5 Null (val-len 0);
+//                              6..255 reserved (a consumer rejects the event)
+//   offset 66   1  val-len     meaningful bytes of `value`, 0..189
+//   offset 67 189  value       the value bytes, NUL-padded after `val-len`
+//
+//   32 + 1 + 32 + 1 + 1 + 189 = 256
+//
+// A constructor cannot emit, so contracts expose a `publishMetadata()` circuit
+// that the deployer calls right after deployment (MIP section 6.7).
+//
+// LEGACY NAME. The Stagenet reference set recorded in ../deployments/ was
+// deployed from commit `1721636` under the pre-final placeholder name
+// `mip-xxxx:token-metadata[v1]`, while the MIP number was still unassigned.
+// Those events are NOT `mip-0018:token-metadata[v1]` events and a conforming
+// v1 consumer ignores them (MIP sections 1 and 8). Nothing was redeployed when
+// the number landed; see ../TOKEN-METADATA.md "The legacy name".
+
+pragma language_version >= 0.26.0;
+
+module TokenMetadata {
+  import CompactStandardLibrary;
+
+  /**
+   * @description The event name of MIP section 1, `pad(32, "mip-0018:token-metadata[v1]")`:
+   * the 27 bytes `6d69702d303031383a746f6b656e2d6d657461646174615b76315d` followed by five
+   * NULs. A consumer accepts a `Misc` event as a TokenMetadata event if and only if its
+   * name is exactly these 32 bytes.
+   *
+   * @dev The event name IS the layout version (MIP section 8). An incompatible layout gets
+   * a new name — `mip-0018:token-metadata[v2]` for an amendment, a fresh `mip-yyyy:` name
+   * for a superseding MIP — and is never a reinterpretation of these bytes. This literal is
+   * the ONLY place the name is written in this module.
+   */
+  export circuit EVENT_NAME(): Bytes<32> {
+    return pad(32, "mip-0018:token-metadata[v1]");
+  }
+
+  /** The `kind` byte of a native unshielded token (MIP section 3). */
+  export circuit KIND_UNSHIELDED(): Uint<8> { return 0; }
+
+  /** The `kind` byte of a native shielded token (MIP section 3). */
+  export circuit KIND_SHIELDED(): Uint<8> { return 1; }
+
+  /** Added to a privacy bit: balances live in contract state, not in UTxOs. */
+  export circuit KIND_LEDGER_FLAG(): Uint<8> { return 2; }
+
+  // The `val-type` byte of MIP section 2.1. Values 6..255 are reserved and a
+  // consumer MUST reject an event carrying one, so there is no constant for
+  // them: nothing in this repository may emit one on purpose.
+
+  /** `val-type` 0 — opaque bytes, no parsing rule at all. */
+  export circuit VAL_TYPE_OPAQUE(): Uint<8> { return 0; }
+
+  /** `val-type` 1 — `value[0..val-len]` is valid UTF-8. */
+  export circuit VAL_TYPE_STRING(): Uint<8> { return 1; }
+
+  /**
+   * `val-type` 2 — an unsigned integer, serialized as the Compact type
+   * `Uint<8 * val-len>` with `1 <= val-len <= 31`. MIP Appendix A's recommended
+   * default is `Uint<128>`, i.e. `val-len = 16`.
+   */
+  export circuit VAL_TYPE_INTEGER(): Uint<8> { return 2; }
+
+  /** `val-type` 3 — ONE complete UTF-8 JSON value (RFC 8259); a fragment is rejected. */
+  export circuit VAL_TYPE_JSON(): Uint<8> { return 3; }
+
+  /** `val-type` 4 — valid UTF-8 that parses as an absolute URI. */
+  export circuit VAL_TYPE_URI(): Uint<8> { return 4; }
+
+  /**
+   * `val-type` 5 — Null: the key's current value is cleared. `val-len` MUST be
+   * zero and all 189 `value` bytes are ignored (MIP sections 2.1 and 6.2). It is
+   * distinct from an empty string, from empty opaque bytes and from the JSON
+   * literal `null` carried under `val-type` 3, and it does not erase history.
+   */
+  export circuit VAL_TYPE_NULL(): Uint<8> { return 5; }
+
+  /**
+   * @description Emits one TokenMetadata event describing `key` = `value` for
+   * the token `(this contract, domainSep, kind)`.
+   *
+   * Everything reaching `emit` is public: callers pass `disclose(...)` for any
+   * witness-derived value (MIP section 6.6).
+   *
+   * @param {Bytes<32>} domainSep - The token's domain separator.
+   * @param {Uint<8>} kind - The kind byte 0..3 (MIP section 3).
+   * @param {Bytes<32>} key - The key name, NUL-padded to 32 bytes.
+   * @param {Uint<8>} valType - How to read `value` (MIP section 2.1).
+   * @param {Uint<8>} valLen - The number of meaningful bytes in `value`, 0..189.
+   * @param {Bytes<189>} value - The value bytes, NUL-padded after `valLen`.
+   */
+  export circuit emitTokenMetadata(
+    domainSep: Bytes<32>,
+    kind: Uint<8>,
+    key: Bytes<32>,
+    valType: Uint<8>,
+    valLen: Uint<8>,
+    value: Bytes<189>
+  ): [] {
+    emit(Misc {
+      name: EVENT_NAME(),
+      // 32 + 1 + 32 + 1 + 1 + 189 = 256
+      payload: Bytes[...domainSep, kind, ...key, valType, valLen, ...value]
+    });
+  }
+
+  /**
+   * @description Clears the current value of `key` for the token
+   * `(this contract, domainSep, kind)` by emitting a Null declaration —
+   * `val-type` 5, `val-len` 0, all 189 value bytes NUL (MIP sections 2.1 and
+   * 6.2). The key's earlier values remain history; only the current value goes.
+   *
+   * @param {Bytes<32>} domainSep - The token's domain separator.
+   * @param {Uint<8>} kind - The kind byte 0..3.
+   * @param {Bytes<32>} key - The key to clear, NUL-padded to 32 bytes.
+   */
+  export circuit emitNull(domainSep: Bytes<32>, kind: Uint<8>, key: Bytes<32>): [] {
+    emitTokenMetadata(domainSep, kind, key, VAL_TYPE_NULL(), 0, pad(189, ""));
+  }
+
+  /**
+   * @description Emits the three core example fields of one token —
+   * `name` (val-type 1), `symbol` (val-type 1) and `decimals` (val-type 2 as
+   * `Uint<128>`, val-len 16) — in that order, as MIP Appendix A encodes them.
+   *
+   * @param {Bytes<32>} domainSep - The token's domain separator.
+   * @param {Uint<8>} kind - The kind byte.
+   * @param {Bytes<32>} name_ - The name, NUL-padded to 32 bytes.
+   * @param {Uint<8>} nameLen - The meaningful length of `name_` (1..32 here; the
+   *   transport allows up to 189 through `emitTokenMetadata`).
+   * @param {Bytes<32>} symbol_ - The symbol, NUL-padded to 32 bytes (Appendix A
+   *   caps `symbol` at 32).
+   * @param {Uint<8>} symbolLen - The meaningful length of `symbol_`.
+   * @param {Uint<8>} decimals_ - The number of decimals (Appendix A: 0..36).
+   */
+  export circuit emitStandardFields(
+    domainSep: Bytes<32>,
+    kind: Uint<8>,
+    name_: Bytes<32>,
+    nameLen: Uint<8>,
+    symbol_: Bytes<32>,
+    symbolLen: Uint<8>,
+    decimals_: Uint<8>
+  ): [] {
+    // name: UTF-8 string (val-type 1)
+    emitTokenMetadata(domainSep, kind, pad(32, "name"), VAL_TYPE_STRING(), nameLen,
+                      Bytes[...name_, ...pad(157, "")]);
+    // symbol: UTF-8 string (val-type 1)
+    emitTokenMetadata(domainSep, kind, pad(32, "symbol"), VAL_TYPE_STRING(), symbolLen,
+                      Bytes[...symbol_, ...pad(157, "")]);
+    // decimals: unsigned integer (val-type 2) as `Uint<128>`, MIP Appendix A's
+    // recommended width, so val-len is 16 and the meaningful prefix is
+    // `serialize<Uint<128>, 16>(decimals_)`.
+    //
+    // Compact serializes an unsigned integer LITTLE-ENDIAN — verified, not
+    // assumed: `convertBigintToBytes(16, 6n)` in compact-runtime 0.19.0 is
+    // `06` followed by fifteen NULs, and a compiled `Uint<128>` ledger cell
+    // holding 258 carries the aligned atom `0201` under a compiler-declared
+    // 16-byte alignment. Appendix A prints the same bytes for `6`.
+    // `decimals_` is a `Uint<8>`, so its value is entirely in the low byte and
+    // the 16-byte serialization is that byte followed by fifteen NULs — which
+    // is exactly the first 16 bytes of `Bytes[decimals_, ...pad(188, "")]`.
+    emitTokenMetadata(domainSep, kind, pad(32, "decimals"), VAL_TYPE_INTEGER(), 16,
+                      Bytes[decimals_, ...pad(188, "")]);
+  }
+}

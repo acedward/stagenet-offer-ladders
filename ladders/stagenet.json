@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "networkId": "stagenet",
+  "mode": "wallet-per-slot",
+  "coinPolicy": "at-least",
+  "tokens": {
+    "stkA": { "decimals": 6, "colour": null },
+    "stkB": { "decimals": 6, "colour": null },
+    "stkC": { "decimals": 6, "colour": null }
+  },
+  "ladders": [
+    { "id": "AB", "give": "stkA", "want": "stkB", "mid": "1.0", "spread": "0.2", "levels": 10, "giveTokens": "100" },
+    { "id": "BC", "give": "stkB", "want": "stkC", "mid": "1.0", "spread": "0.2", "levels": 10, "giveTokens": "100" }
+  ]
+}

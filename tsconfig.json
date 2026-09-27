@@ -16,6 +16,6 @@
     "noUncheckedIndexedAccess": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "e2e/**/*.ts"],
   "exclude": ["node_modules", "contracts/managed"]
 }

@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// GENERATED FILE — do not edit. Produced by scripts/generate-literal-contracts.ts from
+// tokens/stk.json row "stkB" (stkB). Generator and ../TokenMetadata.compact:
+// acedward/mip-0018-midnight-contracts @ 7d9f659 (Apache-2.0), logic unchanged.
+//
+// stkB (stkB), 6 decimals, kind byte 1, template
+// NativeShieldedToken. Every TokenMetadata payload below is a compile-time literal, so each
+// emitting circuit costs about eight rows per event (k=7) instead of the ~120 000 rows per
+// runtime event the parameterised templates pay — see mip-0018-midnight-contracts'
+// TOKEN-METADATA.md "Circuit cost" and its question Q13. The bytes emitted are exactly the bytes MIP
+// section 2 fixes, val-type byte included.
+//
+// Circuits the deployment calls, in order:
+//   publishMetadata (3 events)
+
+pragma language_version >= 0.26.0;
+
+import CompactStandardLibrary;
+import "../TokenMetadata" prefix TM_;
+
+export { ContractAddress, Either, Maybe, ShieldedCoinInfo, ZswapCoinPublicKey };
+
+/** True once `publishMetadata` has run; it may run only once. */
+export ledger _published: Boolean;
+/** How many mints this contract has made, for a cheap read-back after deployment. */
+export ledger _mints: Counter;
+
+/** The domain separator this contract mints and describes under. */
+export circuit domainSep(): Bytes<32> {
+  return pad(32, "stk:stkb");
+}
+
+/** The token's colour: `tokenType(domainSep, this contract)`. */
+export circuit tokenColor(): Bytes<32> {
+  return tokenType(pad(32, "stk:stkb"), kernel.self());
+}
+
+/** The kind byte this contract declares (see MIP section 3). */
+export circuit kind(): Uint<8> {
+  return 1;
+}
+
+export circuit decimals(): Uint<8> {
+  return 6;
+}
+
+export circuit mints(): Uint<64> {
+  return _mints.read() as Uint<64>;
+}
+
+/**
+ * @description publishMetadata — 3 TokenMetadata events, every byte a compile-time literal.
+ */
+export circuit publishMetadata(): [] {
+  assert(!_published, "TokenMetadata: already published");
+  _published = true;
+  // name = "stkB" (val-type 1 string, val-len 4)
+  TM_emitTokenMetadata(pad(32, "stk:stkb"), 1, pad(32, "name"), 1, 4, pad(189, "stkB"));
+  // symbol = "stkB" (val-type 1 string, val-len 4)
+  TM_emitTokenMetadata(pad(32, "stk:stkb"), 1, pad(32, "symbol"), 1, 4, pad(189, "stkB"));
+  // decimals = "6" (val-type 2 integer, val-len 16)
+  TM_emitTokenMetadata(pad(32, "stk:stkb"), 1, pad(32, "decimals"), 2, 16, Bytes[0x06, ...pad(188, "")]);
+}
+
+/**
+ * @description Mints `amount` of this token to `recipient` as a shielded coin.
+ * @param {Bytes<32>} nonce - Caller-supplied and unique per mint.
+ */
+export circuit mint(
+  recipient: Either<ZswapCoinPublicKey, ContractAddress>,
+  amount: Uint<64>,
+  nonce: Bytes<32>
+): ShieldedCoinInfo {
+  assert(amount > 0, "amount must be positive");
+  _mints.increment(1);
+  return mintShieldedToken(pad(32, "stk:stkb"), disclose(amount), disclose(nonce), disclose(recipient));
+}

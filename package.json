@@ -10,9 +10,21 @@
     "bun": "1.3.11"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "wallets:generate": "bun src/cli.ts wallets:generate",
+    "wallets:addresses": "bun src/cli.ts wallets:addresses",
+    "wallets:check": "bun src/cli.ts wallets:check",
+    "makers:status": "bun src/cli.ts makers:status",
+    "makers:register-dust": "bun src/cli.ts makers:register-dust",
+    "makers:mint": "bun src/cli.ts makers:mint",
+    "makers:fund": "bun src/cli.ts makers:fund",
+    "ladder:once": "bun src/cli.ts ladder:once",
+    "ladder:run": "bun src/cli.ts ladder:run",
+    "offers:settle": "bun src/cli.ts offers:settle"
   },
   "dependencies": {
+    "@effectstream/mip-zswap-offer": "0.4.0-v9.0",
     "@midnight-ntwrk/compact-js": "2.5.5-rc.8",
     "@midnight-ntwrk/compact-runtime": "0.19.0",
     "@midnight-ntwrk/midnight-js-contracts": "5.0.0-beta.7",

@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "networkId": "stagenet",
+  "mode": "single-wallet-pinned",
+  "coinPolicy": "exact",
+  "tokens": {
+    "stkA": {
+      "decimals": 6,
+      "colour": "065e530be66eaeb6ebd9aeb60198c0a114ed58928ee4d21ce21b1562f2249934"
+    },
+    "stkB": {
+      "decimals": 6,
+      "colour": "c62b38bced065214c1f7d9c7ae9041355063559501e186eff4d137bda0f843f7"
+    },
+    "stkC": {
+      "decimals": 6,
+      "colour": "95778c5f7234237d696969032d8dcfe22936c98927e4d46483c56d11d9c9883b"
+    }
+  },
+  "ladders": [
+    {
+      "id": "AB",
+      "give": "stkA",
+      "want": "stkB",
+      "mid": "1.0",
+      "spread": "0.2",
+      "levels": 3,
+      "giveTokens": "100"
+    },
+    {
+      "id": "BC",
+      "give": "stkB",
+      "want": "stkC",
+      "mid": "1.0",
+      "spread": "0.2",
+      "levels": 3,
+      "giveTokens": "100"
+    }
+  ],
+  "includeNonces": [
+    "fb5df1634d353d31825a90269dc6d8e099689bf8be13abaae749ccaae8298a1e",
+    "d857315ba1fe08072c800ee80faf5a9ce9fb14cb72d1941e4883d12b7e3306a8",
+    "5c95c8950b06347aedc9fbccefc012f2d642dd023de5c7084457386d6bd5bf44",
+    "03cd8ce03338c42448cb251c55aaf033a81e209c80c6c349afe61b75edd3ba1f",
+    "b611560fa87b9d0bb493aee30ef648872c56645a286bd0161886b540ec6b87a5",
+    "56efd1cef679781103646c95b1102d3ca9f6299227f0a4497af91ebddaf9ac7e"
+  ],
+  "excludeNonces": [
+    "f4bb91e5ba0ca72135d92a9b2d7b999aa20a07f08d85e101c5e3e466397b1138",
+    "7b69bf96c166dc357a0b3204f503e8b31da4f2c994dddd47fc1f6642a00b9470"
+  ]
+}

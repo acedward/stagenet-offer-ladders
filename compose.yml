@@ -1,0 +1,51 @@
+# Offer ladder service + proof server (project 00053).
+#
+#   cp .env.example .env        # then edit; secrets are NOT set here (file paths only)
+#   docker compose up -d        # production: wallet-per-slot, maker secrets read-only
+#   docker compose -f compose.yml -f compose.test.yml up -d   # single-wallet test mode
+#
+# Secrets: the maker secrets file ($SECRETS_DIR/makers.json, mode 600) is mounted
+# READ-ONLY as a single file; the funding wallet file only by compose.test.yml.
+# State: the journal, outbox and service.lock live in the HOST directory $STATE_DIR_HOST
+# (default ~/.stagenet-offer-ladders/state), the same one scripts/ladder-run.sh uses, so
+# `docker compose down -v` cannot delete it and the helper and the service share one
+# journal and one lock (audit C1, C4). Never delete that directory while offers are live.
+name: ${COMPOSE_PROJECT_NAME:-stagenet-offer-ladders}
+
+services:
+  proof-server:
+    image: midnightntwrk/proof-server:9.0.0-rc.6@sha256:38a819eacde273f725551fdf90ca7c31ebf3c0ff145f3ed58ee35f92fb7ce95b
+    restart: unless-stopped
+    # The image has no shell for a health check; the ladder waits for its /health at start
+    # and exits on a build timeout. If BUILD_TIMEOUT repeats, run: docker compose restart proof-server
+
+  ladder:
+    build: .
+    image: stagenet-offer-ladders:${IMAGE_TAG:-local}
+    # service.lock liveness is its 30 s heartbeat (stale after 90 s), not the host or PID
+    # (audit F-B25): after a crash the restarted container waits at most ~90 s.
+    restart: unless-stopped
+    mem_limit: ${LADDER_MEM_LIMIT:-4g}
+    depends_on:
+      - proof-server
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MN_PROOF_SERVER_URL: http://proof-server:6300
+      STATE_DIR: /data
+      MAKERS_FILE: /secrets/makers.json
+      MAKERS_DIR_CHECK: "false"
+      STATUS_PORT: "8080"
+    volumes:
+      - ${SECRETS_DIR:-~/.stagenet-offer-ladders}/makers.json:/secrets/makers.json:ro
+      - ${STATE_DIR_HOST:-~/.stagenet-offer-ladders/state}:/data
+    ports:
+      - "127.0.0.1:${STATUS_HOST_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15m
+      retries: 3
+
