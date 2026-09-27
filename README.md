@@ -142,6 +142,8 @@ or wallet state. It is kept out as follows:
 
 ## Offer ladders (project 00053)
 
+> **Since 2026-09-27 the running service quotes the 00057 stock/USDC books** (`LADDER_FILE=ladders/stagenet.usdc.json`, see "Stock/USDC books" below). The AB/BC grid ladders described here are retired: they were never posted, and their journal is archived. The service, its modes and its operating rules are unchanged.
+
 Two ladders of fixed-price Offer Files, kept valid by a long-running service:
 
 | Ladder | Offer | Slots | Price (want per give) |
@@ -187,7 +189,8 @@ are in `ladders/makers.stagenet.public.json`.
    (colours in `deployments/stagenet.json`). With `ZSWAP_API` empty the service runs in
    **outbox mode**: offers are built and stored in `state/outbox/`, not posted.
 6. **Run** (from the repository directory):
-   - `cp .env.example .env`, then edit it: `LADDER_FILE`, `LADDER_MEM_LIMIT` (2g is enough
+   - `cp .env.example .env`, then edit it: `LADDER_FILE` with its own `JOURNAL_FILE` and
+     `OUTBOX_DIR` (the example defaults are the live books), `LADDER_MEM_LIMIT` (2g is enough
      for 20 makers, see below) and a free `STATUS_HOST_PORT`. Keep comments on their own
      lines (Compose reads `KEY=   # text` as the value `# text`).
    - `docker compose up -d`. The first start of a new journal builds nothing and `/health`
