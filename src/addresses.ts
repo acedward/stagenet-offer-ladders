@@ -14,7 +14,10 @@ export interface PublicMakerEntry extends PublicWalletIdentity {
   readonly slot: string;
   readonly ladder: string;
   readonly level: number;
-  /** Want per give, 3 decimals, from the ladder file; `null` when the ladder is not in it. */
+  /**
+   * The price of the slot that uses this wallet, from the ladder file (grid: want per give,
+   * 3 decimals; book: quote per base as configured); `null` when no slot uses it.
+   */
   readonly price: string | null;
   readonly gives: string | null;
   readonly wants: string | null;
@@ -32,15 +35,19 @@ export interface PublicMakersFile {
 }
 
 export const HOW_TO_FUND: readonly string[] = [
-  "Send NIGHT to each maker's UNSHIELDED address (mn_addr_stagenet1…). The stagenet faucet has a CAPTCHA, so this is done by hand.",
-  "Then run `makers:register-dust`: it registers each maker's NIGHT UTXOs for DUST generation (idempotent; skips makers without NIGHT).",
-  "Wait until `makers:status` shows DUST for the makers, then run `makers:mint`: each maker self-mints its give token (AB → stkA, BC → stkB) as one coin of INVENTORY_OFFERS × give (default 10 × 100 tokens).",
-  "The shielded and DUST addresses are listed for reference only; do not send NIGHT to them.",
+  "Book makers (00057 onwards) get their give inventory by SHIELDED transfer from the funding wallet: `makers:fund --ladder-file <book> [--slots …]` sends each maker its ladder's `inventoryTokens` to its shielded address (mn_shield-addr_stagenet1…).",
+  "Making offers is fee-free for a maker (the taker pays), so a maker needs no NIGHT or DUST to post offers. Makers added with `wallets:add` (00058) get no NIGHT: they cannot move tokens out, or retire an offer by spending its coin, until someone sends NIGHT to their UNSHIELDED address (mn_addr_stagenet1…) and runs `makers:register-dust`.",
+  "History: the first 20 makers (AB-01…10, BC-01…10, 00053) were funded with NIGHT by hand (the stagenet faucet has a CAPTCHA), registered for DUST with `makers:register-dust` and self-minted native stk inventory with `makers:mint`; that route is retired.",
+  "The DUST addresses are listed for reference only.",
 ];
 
-/** Derive every maker's public identity (in memory) and join the ladder prices. */
+/**
+ * Derive every maker's public identity (in memory) and join the ladder prices. A maker is
+ * joined to the slot that uses it: the slot's `walletId` (a book's `wallets` mapping, e.g.
+ * AASK-01 → AB-01), which defaults to the slot id (00053).
+ */
 export const buildPublicMakers = (makers: MakersFile, ladders: LadderFile | undefined): PublicMakersFile => {
-  const slots = new Map((ladders ? buildSlots(ladders) : []).map((slot) => [slot.id, slot]));
+  const slots = new Map((ladders ? buildSlots(ladders) : []).map((slot) => [slot.walletId, slot]));
   const entries: PublicMakerEntry[] = makers.makers.map((maker) => {
     const identity = identityOf(maker.mnemonic, makers.networkId);
     verifyIdentityAddresses(identity, makers.networkId);
