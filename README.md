@@ -693,10 +693,16 @@ The running service is not touched until step 6.
      scripts/ladder-run.sh makers:fund --ladder-file ladders/stagenet.books.json --slots $SLOTS
    ```
 
-   The dry run lists 9 × `send` of 100 tokens; the real run sends 2 batches (5 + 4 makers,
-   one transaction per token and batch); a second run is all `skip-already-sent`. When the
-   service is switched (step 6), merge the new `sent` records into
-   `state/maker-funding.json` so later runs from the default directory see them.
+   The dry run lists 9 × `send` of 100 tokens. Batches are per token (`--batch-size` makers
+   of one colour per transaction), so the real run sends 3 transactions of 3 makers each
+   (measured 2026-09-29: 3 min including the funder's 2-min sync, 1.29 DUST in fees). A
+   second run is all `skip-already-sent` and opens no wallet. To read the makers' balances,
+   use an EMPTY record directory (a `sent` record skips the balance read):
+   `STATE_SUBDIR=o58-check scripts/ladder-run.sh makers:fund … --slots $SLOTS --check-balances --dry-run`
+   syncs each new maker (about 2 min each; the running service does not hold these wallets)
+   and reports `skip-already-holds` with the balance. When the service is switched (step 6),
+   merge the new `sent` records into `state/maker-funding.json` so later runs from the
+   default directory see them.
 5. **Prove a zero-DUST maker's offer without posting it** (outbox mode with `ZSWAP_API`
    unset, a scratch state directory, a scratch ladder file with `"onlySlots": ["T13A-01"]` kept out of git, e.g. under
    `out/`):
