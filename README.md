@@ -16,6 +16,9 @@ It holds these pieces of work:
 3. **Stock/USDC books** (project 00057, same PR as 2). The same service quotes wStkA/wUSDC and
    wStkB/wUSDC on both sides at cent prices, with the tokens bridged from Sepolia (AA 00037).
    The 20 existing maker wallets are reused. See "Stock/USDC books" below.
+4. **T-bill books** (project 00058). The same service sells the bridged test T-bills TB13W,
+   TB26W and TB52W for wUSDC at fixed prices, 10 tokens per offer, from 9 new maker wallets
+   added with `wallets:add`. See "T-bill books" below.
 
 ## stkA / stkB / stkC on stagenet
 
@@ -224,6 +227,7 @@ are in `ladders/makers.stagenet.public.json`.
 | Command | What it does |
 |---|---|
 | `wallets:generate --count 20 --ladders AB,BC` | create the maker wallets (refuses to overwrite) |
+| `wallets:add --ladders T13,T26,T52 --count 9` | append new maker wallets to the existing secrets file (backup first, old entries byte-identical; 00058) |
 | `wallets:addresses` / `wallets:check` | write / verify the public addresses file |
 | `makers:status [--slots …]` | sync makers one at a time; NIGHT, DUST, shielded balances |
 | `makers:register-dust [--slots …]` | register NIGHT for DUST generation |
@@ -232,7 +236,7 @@ are in `ladders/makers.stagenet.public.json`.
 | `ladder:once` / `ladder:run` | one reconcile tick / the service loop (SIGTERM stops after the current slot) |
 | `offers:verify` | decode the current offers and check them against the journal and the grid |
 | `offers:inspect --offer-id …` | decode one stored offer |
-| `offers:settle --slot AB-02 --pay-with <nonce>` | test taker: settle a stored offer with the funding wallet, paying with a pinned coin |
+| `offers:settle --slot AB-02 --pay-with <nonce> [--dry-run]` | test taker: settle a stored offer with the funding wallet, paying with a pinned coin; `--dry-run` balances, proves and finalizes it, reports the fee and size, and does not submit (00058) |
 | `funding:status` | balances of the funding wallet |
 
 ### Staged rollout (audit C13) — done in outbox mode on 2026-09-27
@@ -594,6 +598,143 @@ The run:
 4. A taker buys `AASK-01` and sells into `ABID-01` with exact balance deltas.
 5. Both slots re-offer from their change, and a restart builds nothing.
 6. The stack is removed with `down -v`.
+
+## T-bill books (project 00058)
+
+The service also sells three bridged test T-bills for wUSDC at the owner's **fixed** prices,
+10 tokens per offer. The ladder file is `ladders/stagenet.books.json`: the T-bill ladders
+first, then the four 00057 ladders copied unchanged from `ladders/stagenet.usdc.json` (which
+stays as it is).
+
+| Pair | Price (wUSDC per token) | Offer (raw units) | Ladders (one level each) | Makers | Each maker holds |
+|---|---|---|---|---|---|
+| TB13W/wUSDC | 0.9899 | gives 10,000,000 TB13W, wants 9,899,000 wUSDC | `T13A`, `T13B`, `T13C` | T13-01…03 | 100 TB13W (10 fills) |
+| TB26W/wUSDC | 0.9905 | gives 10,000,000 TB26W, wants 9,905,000 wUSDC | `T26A`, `T26B`, `T26C` | T26-01…03 | 100 TB26W |
+| TB52W/wUSDC | 0.9806 | gives 10,000,000 TB52W, wants 9,806,000 wUSDC | `T52A`, `T52B`, `T52C` | T52-01…03 | 100 TB52W |
+
+- **Asks only**: the makers sell T-bills; `/status` `books` shows each pair's best ask and a
+  `null` best bid.
+- **Fixed price, several offers**: a ladder's prices must be strictly monotonic, so each
+  offer at the same price is its own one-level ladder with its own maker wallet (one wallet
+  per offer). Slot ids are `T13A-01`, `T13B-01`, … .
+- **Order**: the T-bill ladders come first in the file, so the first tick after a restart
+  posts them before it reconciles the 20 stock slots.
+- **The new makers get no NIGHT.** Making an offer is fee-free for a maker, so they post
+  normally; they cannot move tokens out, or retire an offer by spending its coin, until
+  someone funds them with NIGHT.
+- **A price is fixed for a slot's life** (the journal refuses a changed definition), and the
+  service never cancels offers. A new price needs new slots.
+
+| What | Value |
+|---|---|
+| TB13W colour (Test T-Bill 13-week) | `b3d96e9933fb4548ce8a17a63f4c92bb3894b3571873c3edcc8a08aa7ce2512b` |
+| TB26W colour (Test T-Bill 26-week) | `7b044b55c0493a67eeb16f25d3757eea07f9abaf55e374739953afd449bc3b62` |
+| TB52W colour (Test T-Bill 52-week) | `8f4798a5ee48747f37562da76ed8711ad4b4ea1ad7ac16d80eb74b92792b9ec2` |
+| TB13W / TB26W / TB52W ERC20 (Sepolia, 6 decimals) | `0x5cF366decA552c30eBB2504d0b9Ee104A99f1c72` / `0x26dB7221903e62310409e454442adBb46E0B6E33` / `0x02A0D1BaF66351715A84aC4763b82f1155BdD5b0` |
+| Bridge vault and records | the vault above (`7771c9e5…d637`); [acedward/passport PR #4](https://github.com/acedward/passport/pull/4) (AA 00045) |
+| Ladder file | `ladders/stagenet.books.json` (the T-bill books + the 00057 stock books) |
+
+### Adding tokens and makers (00058)
+
+Run the commands from the repository directory. The checkout needs its `node_modules`
+(once: `docker run --rm -v "$PWD":/work -w /work oven/bun:1.3.11 bun install --frozen-lockfile`).
+The running service is not touched until step 6.
+
+1. **The ladder file.** Add each token with its recorded colour and `bridge` block (every load
+   checks the colour against the vault derivation), then one ladder per offer; give each
+   ladder a new wallet id in `wallets`. Check it: `bun test test/tbill-books.test.ts` (in
+   Docker) or `scripts/ladder-run.sh makers:fund --ladder-file <file> --dry-run`.
+2. **Add the maker wallets** to the existing secrets file. `wallets:add` needs the secrets
+   *directory* mounted read-write (it writes a backup and replaces the file with a rename), so
+   it runs in its own container rather than through `scripts/ladder-run.sh`:
+
+   ```sh
+   shasum -a 256 ~/.stagenet-offer-ladders/makers.json   # record it; never print the contents
+   docker run --rm -v "$PWD":/work -w /work \
+     -v "$HOME/.stagenet-offer-ladders":/secrets-dir -e MAKERS_FILE=/secrets-dir/makers.json \
+     oven/bun:1.3.11 bun src/cli.ts wallets:add --ladders T13,T26,T52 --count 9
+   ```
+
+   - It refuses a missing file, a network mismatch, any wallet id that already exists, and a
+     file that is not in the form `wallets:generate` writes.
+   - It writes `makers.json.bak-<UTC stamp>` (mode 600) first, then the merged file (temp
+     600 → fsync → rename → fsync of the 700 directory). Every existing entry keeps its order
+     and bytes: the new file starts with the old bytes up to the last old entry
+     (`preservedPrefix` in the output), and the new entries follow.
+   - It prints the new wallet ids and unshielded addresses, the counts and sha256s before and
+     after, and the backup path. It never prints a mnemonic.
+   - Never edit, move or regenerate `makers.json` by hand: it holds the only copy of the
+     funded makers' keys. Keep the backup.
+3. **Check and publish the addresses**:
+
+   ```sh
+   docker run --rm -v "$PWD":/work -w /work \
+     -v "$HOME/.stagenet-offer-ladders/makers.json":/secrets/makers.json:ro \
+     -e MAKERS_FILE=/secrets/makers.json -e MAKERS_DIR_CHECK=false \
+     oven/bun:1.3.11 bun src/cli.ts wallets:addresses --ladder-file ladders/stagenet.books.json
+   # the same mounts, then: bun src/cli.ts wallets:check   → "result": "PASS"
+   ```
+
+   `wallets:addresses` rewrites `ladders/makers.stagenet.public.json` (public keys and
+   addresses only; each maker shows the price of the slot that uses it). `wallets:check`
+   re-derives every wallet and must match that file; the old makers' addresses do not
+   change.
+4. **Fund the new makers** from the funding wallet (shielded transfers; no maker wallet is
+   opened, so the service can keep running). Record the transfers in a separate state
+   directory, seeded with the live records, so the running service's directory is not
+   written to:
+
+   ```sh
+   mkdir -m 700 ~/.stagenet-offer-ladders/o58-funding
+   cp -p ~/.stagenet-offer-ladders/state/maker-funding.json ~/.stagenet-offer-ladders/o58-funding/
+   SLOTS=T13A-01,T13B-01,T13C-01,T26A-01,T26B-01,T26C-01,T52A-01,T52B-01,T52C-01
+   STATE_SUBDIR=o58-funding scripts/ladder-run.sh makers:fund --ladder-file ladders/stagenet.books.json --slots $SLOTS --dry-run
+   FUNDING_WALLET_FILE_HOST=/path/to/funding-mnemonic-file STATE_SUBDIR=o58-funding \
+     scripts/ladder-run.sh makers:fund --ladder-file ladders/stagenet.books.json --slots $SLOTS
+   ```
+
+   The dry run lists 9 × `send` of 100 tokens. Batches are per token (`--batch-size` makers
+   of one colour per transaction), so the real run sends 3 transactions of 3 makers each
+   (measured 2026-09-29: 3 min including the funder's 2-min sync, 1.29 DUST in fees). A
+   second run is all `skip-already-sent` and opens no wallet. To read the makers' balances,
+   use an EMPTY record directory (a `sent` record skips the balance read):
+   `STATE_SUBDIR=o58-check scripts/ladder-run.sh makers:fund … --slots $SLOTS --check-balances --dry-run`
+   syncs each new maker (about 2 min each; the running service does not hold these wallets)
+   and reports `skip-already-holds` with the balance. When the service is switched (step 6),
+   merge the new `sent` records into `state/maker-funding.json` so later runs from the
+   default directory see them.
+5. **Prove a zero-DUST maker's offer without posting it** (outbox mode with `ZSWAP_API`
+   unset, a scratch state directory, a scratch ladder file with `"onlySlots": ["T13A-01"]` kept out of git, e.g. under
+   `out/`):
+
+   ```sh
+   STATE_SUBDIR=o58-scratch LADDER_FILE=out/scratch.json \
+     scripts/ladder-run.sh ladder:once                        # prints the fresh-start token
+   STATE_SUBDIR=o58-scratch LADDER_FILE=out/scratch.json FRESH_START_ACK=<token> \
+     scripts/ladder-run.sh ladder:once                        # builds and stores the offer
+   STATE_SUBDIR=o58-scratch LADDER_FILE=out/scratch.json scripts/ladder-run.sh offers:verify
+   FUNDING_WALLET_FILE_HOST=/path/to/funding-mnemonic-file STATE_SUBDIR=o58-scratch LADDER_FILE=out/scratch.json \
+     scripts/ladder-run.sh offers:settle --slot T13A-01 --pay-with <wUSDC coin nonce ≥ 9.899> --dry-run
+   rm -rf ~/.stagenet-offer-ladders/o58-scratch               # the scratch offer is never posted
+   ```
+
+   The dry run balances the settlement with the pinned wUSDC coin, proves and finalizes it,
+   prints the fee (`feeDust`) and size (`bytes`), releases the wallet's reservation, and
+   submits nothing. The same `--dry-run` works against a live offer from a copy of the live
+   state (see "Runbook (books)" step 6).
+6. **Switch the running service** (in its `docker compose` directory): back up `.env`, check
+   out this branch, set `LADDER_FILE=ladders/stagenet.books.json` and a new `IMAGE_TAG`, keep
+   `JOURNAL_FILE` and `OUTBOX_DIR` (the same journal: the 20 stock slots keep their
+   definitions and their live offers, and the new slots join as `idle`, so no fresh-start
+   acknowledgement is needed), then `docker compose up -d --build --timeout 150 ladder`. The
+   recreated container mounts the new `makers.json`.
+   - Tick 1 opens each wallet in file order: every T-bill maker builds and posts its offer
+     right after its sync (about 2 min each), then the 20 stock slots reconcile as `live`
+     with their same offer ids, with no build and no post.
+   - Rollback before the first T-bill post: restore the `.env` backup and run the same
+     `up -d` (the previous image). After it, the journal refuses a ladder file without the
+     T-bill slots (their offers are outstanding), which is intended: keep
+     `ladders/stagenet.books.json`.
 
 ## License
 

@@ -6,8 +6,12 @@
  *   entropy → 24 words) and exist only in memory and in the secrets file;
  * - the secrets file (default `$HOME/.stagenet-offer-ladders/makers.json`) lives outside
  *   every repository, in a mode-700 directory, as a mode-600 file; it is written
- *   atomically (temp file + fsync + `link`) and is NEVER overwritten: `link(2)` fails with
- *   `EEXIST` if the target exists, so a concurrent writer cannot clobber it either;
+ *   atomically (temp file + fsync + `link`) and `wallets:generate` NEVER overwrites it:
+ *   `link(2)` fails with `EEXIST` if the target exists, so a concurrent writer cannot
+ *   clobber it either;
+ * - `wallets:add` (00058) is the only writer of an existing file: it appends new makers
+ *   after a byte-exact mode-600 backup, keeps every existing entry's bytes and order, and
+ *   replaces the file atomically (temp + fsync + `rename`);
  * - nothing in this module prints, logs or returns a mnemonic except `readMakersFile`,
  *   whose callers keep it in memory; error messages never quote file contents.
  *
@@ -20,7 +24,8 @@
  *
  * @module
  */
-import { randomBytes } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -30,6 +35,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -161,7 +167,7 @@ export interface MakersFile {
 
 /** A problem with the secrets file. The message never contains file contents. */
 export class SecretsFileError extends Error {
-  readonly code: "EXISTS" | "PERMISSIONS" | "MISSING" | "INVALID";
+  readonly code: "EXISTS" | "PERMISSIONS" | "MISSING" | "INVALID" | "COLLISION" | "NETWORK" | "CHANGED";
   constructor(code: SecretsFileError["code"], path: string, detail: string) {
     super(`secrets file ${path}: ${detail}`);
     this.name = "SecretsFileError";
@@ -335,5 +341,183 @@ export const generateMakers = (
     createdAt: new Date().toISOString(),
     derivation: DERIVATION_LABEL,
     makers,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Adding makers to an existing secrets file (00058 FR-006)
+// ---------------------------------------------------------------------------
+
+/** sha256 of a file's bytes, hex (safe to print: it names a version of a file, not its contents). */
+export const sha256Hex = (bytes: Uint8Array | string): string => createHash("sha256").update(bytes).digest("hex");
+
+/** The serialisation `writeMakersFileExclusive` writes (and `wallets:add` keeps). */
+const serialiseMakers = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+
+/** How a canonical makers file ends after its last maker entry. */
+const MAKERS_TAIL = "\n  ]\n}\n";
+
+/** `20260929T185012Z` */
+export const backupStamp = (date: Date): string => date.toISOString().replace(/\.\d{3}Z$/u, "Z").replace(/[-:]/gu, "");
+
+export interface AddMakersOptions {
+  /** The network the new wallets are for; must equal the file's `networkId`. */
+  readonly networkId: string;
+  /** The wallets to add (`planMakerSlots`): ids, ladders and levels. */
+  readonly plan: readonly { slot: string; ladder: string; level: number }[];
+  readonly mnemonicSource?: () => string;
+  readonly now?: () => Date;
+  /** Test hook: runs after the new file is written to its temp name, before the rename. */
+  readonly beforeRename?: () => void;
+}
+
+/** What `addMakersToFile` did. Public data only: ids, addresses, counts and hashes. */
+export interface AddMakersResult {
+  readonly makersFile: string;
+  readonly backupFile: string;
+  readonly networkId: string;
+  readonly before: { readonly entries: number; readonly sha256: string; readonly bytes: number };
+  readonly after: { readonly entries: number; readonly sha256: string; readonly bytes: number };
+  /**
+   * The old file's bytes up to the end of its last maker entry, which the new file starts
+   * with unchanged (so every old entry keeps its order and bytes).
+   */
+  readonly preserved: { readonly bytes: number; readonly sha256: string };
+  readonly added: readonly (PublicWalletIdentity & { readonly slot: string; readonly ladder: string; readonly level: number })[];
+}
+
+const fsyncDirectory = (directory: string): void => {
+  try {
+    const dirFd = openSync(directory, "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    /* directory fsync is not supported everywhere */
+  }
+};
+
+/** Write `contents` to a NEW file (O_EXCL, mode 600) and fsync it. */
+const writeNewFile = (path: string, contents: Uint8Array | string): void => {
+  const fd = openSync(path, "wx", 0o600);
+  try {
+    if (typeof contents === "string") writeSync(fd, contents);
+    else writeSync(fd, contents);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+};
+
+/**
+ * Append fresh maker wallets to an EXISTING secrets file (spec FR-006):
+ *
+ * 1. read and validate the file (`readMakersFile`: mode 600, directory 700, valid mnemonics);
+ *    refuse a missing file, a network mismatch, a planned id that already exists, or a file
+ *    that is not in the canonical form `wallets:generate` writes (its bytes could not be kept);
+ * 2. generate mnemonics distinct from every existing one;
+ * 3. write a byte-exact backup `<file>.bak-<UTC stamp>` (mode 600, O_EXCL) and check it;
+ * 4. write the merged file to a temp name (600) → fsync → re-check that the original did
+ *    not change meanwhile → `rename` over it → fsync the directory;
+ * 5. re-read and check: old entries byte-identical (the new file starts with the old bytes
+ *    up to the last old entry), new entries appended in plan order, mode 600.
+ *
+ * Existing entries are never re-serialised from parsed data that could differ: the merged
+ * text is checked to start with the old text. Nothing here prints or returns a mnemonic.
+ */
+export const addMakersToFile = (path: string, options: AddMakersOptions): AddMakersResult => {
+  const directory = dirname(path);
+  const existing = readMakersFile(path); // MISSING / PERMISSIONS / INVALID
+  ensurePrivateDirectory(directory);
+  const oldBytes = readFileSync(path);
+  const oldText = oldBytes.toString("utf8");
+  const oldSha = sha256Hex(oldBytes);
+  if (existing.networkId !== options.networkId) {
+    throw new SecretsFileError("NETWORK", path, `is for network ${existing.networkId}, not ${options.networkId}`);
+  }
+  if (existing.makers.length === 0) throw new SecretsFileError("INVALID", path, "holds no makers");
+  const raw = JSON.parse(oldText) as { makers: unknown[] } & Record<string, unknown>;
+  if (serialiseMakers(raw) !== oldText || !oldText.endsWith(MAKERS_TAIL)) {
+    throw new SecretsFileError("INVALID", path, "is not in the canonical form wallets:generate writes; refusing to rewrite it");
+  }
+  if (options.plan.length === 0) throw new RangeError("nothing to add");
+  const planned = new Set<string>();
+  for (const entry of options.plan) {
+    if (!SLOT.test(entry.slot) || !entry.slot.startsWith(`${entry.ladder}-`)) throw new RangeError(`invalid wallet id ${entry.slot}`);
+    if (!Number.isSafeInteger(entry.level) || entry.level < 0) throw new RangeError(`invalid level for ${entry.slot}`);
+    if (planned.has(entry.slot)) throw new RangeError(`wallet id ${entry.slot} is planned twice`);
+    planned.add(entry.slot);
+  }
+  const collisions = existing.makers.filter((m) => planned.has(m.slot)).map((m) => m.slot);
+  if (collisions.length > 0) {
+    throw new SecretsFileError("COLLISION", path, `already holds wallet id(s) ${collisions.join(", ")}; nothing was changed`);
+  }
+  // Fresh mnemonics, distinct from every existing one and from each other.
+  const source = options.mnemonicSource ?? newMnemonic;
+  const seen = new Set(existing.makers.map((m) => m.mnemonic));
+  const fresh = options.plan.map((entry) => {
+    let mnemonic = normaliseMnemonic(source());
+    for (let attempt = 0; seen.has(mnemonic); attempt++) {
+      if (attempt >= 3) throw new Error("mnemonic source returned a duplicate of an existing or new wallet");
+      mnemonic = normaliseMnemonic(source());
+    }
+    seen.add(mnemonic);
+    return { slot: entry.slot, ladder: entry.ladder, level: entry.level, mnemonic };
+  });
+  const newText = serialiseMakers({ ...raw, makers: [...raw.makers, ...fresh] });
+  const preservedText = oldText.slice(0, oldText.length - MAKERS_TAIL.length);
+  if (!newText.startsWith(`${preservedText},\n`)) throw new Error("internal: the merged file does not keep the old entries' bytes");
+
+  // Backup first (exact bytes), then the atomic replace.
+  const now = (options.now ?? (() => new Date()))();
+  const backupFile = `${path}.bak-${backupStamp(now)}`;
+  try {
+    writeNewFile(backupFile, oldBytes);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new SecretsFileError("EXISTS", backupFile, "already exists; refusing to overwrite a backup");
+    throw error;
+  }
+  fsyncDirectory(directory);
+  if (sha256Hex(readFileSync(backupFile)) !== oldSha) throw new Error(`backup ${backupFile} does not match the original; nothing was changed`);
+  const temp = join(directory, `.makers.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  let renamed = false;
+  try {
+    writeNewFile(temp, newText);
+    options.beforeRename?.();
+    if (sha256Hex(readFileSync(path)) !== oldSha) {
+      throw new SecretsFileError("CHANGED", path, "changed while wallets:add ran; nothing was replaced (the backup is kept)");
+    }
+    renameSync(temp, path);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        if (existsSync(temp)) unlinkSync(temp);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+  fsyncDirectory(directory);
+
+  // Verify what is on disk now.
+  const newBytes = readFileSync(path);
+  const merged = readMakersFile(path);
+  if ((lstatSync(path).mode & 0o777) !== 0o600) throw new Error(`${path} is not mode 600 after the replace`);
+  if (!newBytes.toString("utf8").startsWith(`${preservedText},\n`)) throw new Error("the replaced file does not start with the old entries");
+  if (merged.makers.length !== existing.makers.length + fresh.length) throw new Error("the replaced file has an unexpected number of makers");
+  merged.makers.slice(existing.makers.length).forEach((maker, i) => {
+    if (maker.slot !== fresh[i]!.slot || maker.mnemonic !== fresh[i]!.mnemonic) throw new Error(`the replaced file's entry ${maker.slot} is not the one written`);
+  });
+  return {
+    makersFile: path,
+    backupFile,
+    networkId: existing.networkId,
+    before: { entries: existing.makers.length, sha256: oldSha, bytes: oldBytes.length },
+    after: { entries: merged.makers.length, sha256: sha256Hex(newBytes), bytes: newBytes.length },
+    preserved: { bytes: Buffer.byteLength(preservedText), sha256: sha256Hex(preservedText) },
+    added: fresh.map(({ mnemonic, ...entry }) => ({ ...entry, ...identityOf(mnemonic, existing.networkId) })),
   };
 };

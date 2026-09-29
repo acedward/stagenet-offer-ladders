@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test",
     "wallets:generate": "bun src/cli.ts wallets:generate",
+    "wallets:add": "bun src/cli.ts wallets:add",
     "wallets:addresses": "bun src/cli.ts wallets:addresses",
     "wallets:check": "bun src/cli.ts wallets:check",
     "makers:status": "bun src/cli.ts makers:status",

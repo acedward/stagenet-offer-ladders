@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "networkId": "stagenet",
+  "mode": "wallet-per-slot",
+  "coinPolicy": "at-least",
+  "tokens": {
+    "wStkA": {
+      "decimals": 6,
+      "colour": "5eb2a3cebb2ebe7ba910c78f62c9e28e0d74acbd00c810730def3578860e6a02",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x2Ab7BE0769e3BBD5c7d047B422CB383fCC06FB52" }
+    },
+    "wStkB": {
+      "decimals": 6,
+      "colour": "e7ca18cb056477a5aca5cce387306d56526c2f226b4a4e34f068e3a3e8179588",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0xF2bEFf36543219C8feC2AB2f42070AA65D3C844B" }
+    },
+    "wUSDC": {
+      "decimals": 6,
+      "colour": "e5afe273bcb1252cfbc81ad6ca1caaafe22312c8c29f9b104a2fe3ead980bb2d",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238" }
+    },
+    "TB13W": {
+      "decimals": 6,
+      "colour": "b3d96e9933fb4548ce8a17a63f4c92bb3894b3571873c3edcc8a08aa7ce2512b",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x5cF366decA552c30eBB2504d0b9Ee104A99f1c72" }
+    },
+    "TB26W": {
+      "decimals": 6,
+      "colour": "7b044b55c0493a67eeb16f25d3757eea07f9abaf55e374739953afd449bc3b62",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x26dB7221903e62310409e454442adBb46E0B6E33" }
+    },
+    "TB52W": {
+      "decimals": 6,
+      "colour": "8f4798a5ee48747f37562da76ed8711ad4b4ea1ad7ac16d80eb74b92792b9ec2",
+      "bridge": { "vault": "7771c9e53afb45291ae2cecd48b5d55262734b08a98fc8276ed0f980031cd637", "erc20": "0x02A0D1BaF66351715A84aC4763b82f1155BdD5b0" }
+    }
+  },
+  "ladders": [
+    { "id": "T13A", "side": "ask", "base": "TB13W", "quote": "wUSDC", "prices": ["0.9899"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T13-01"] },
+    { "id": "T13B", "side": "ask", "base": "TB13W", "quote": "wUSDC", "prices": ["0.9899"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T13-02"] },
+    { "id": "T13C", "side": "ask", "base": "TB13W", "quote": "wUSDC", "prices": ["0.9899"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T13-03"] },
+    { "id": "T26A", "side": "ask", "base": "TB26W", "quote": "wUSDC", "prices": ["0.9905"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T26-01"] },
+    { "id": "T26B", "side": "ask", "base": "TB26W", "quote": "wUSDC", "prices": ["0.9905"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T26-02"] },
+    { "id": "T26C", "side": "ask", "base": "TB26W", "quote": "wUSDC", "prices": ["0.9905"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T26-03"] },
+    { "id": "T52A", "side": "ask", "base": "TB52W", "quote": "wUSDC", "prices": ["0.9806"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T52-01"] },
+    { "id": "T52B", "side": "ask", "base": "TB52W", "quote": "wUSDC", "prices": ["0.9806"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T52-02"] },
+    { "id": "T52C", "side": "ask", "base": "TB52W", "quote": "wUSDC", "prices": ["0.9806"], "giveTokens": "10", "inventoryTokens": "100", "wallets": ["T52-03"] },
+    {
+      "id": "AASK",
+      "side": "ask",
+      "base": "wStkA",
+      "quote": "wUSDC",
+      "prices": ["0.0104", "0.0108", "0.0112", "0.0116", "0.0120"],
+      "giveTokens": "100",
+      "inventoryTokens": "1000",
+      "wallets": ["AB-01", "AB-02", "AB-03", "AB-04", "AB-05"]
+    },
+    {
+      "id": "ABID",
+      "side": "bid",
+      "base": "wStkA",
+      "quote": "wUSDC",
+      "prices": ["0.0096", "0.0092", "0.0088", "0.0084", "0.0080"],
+      "giveTokens": "1",
+      "inventoryTokens": "2",
+      "wallets": ["AB-06", "AB-07", "AB-08", "AB-09", "AB-10"]
+    },
+    {
+      "id": "BASK",
+      "side": "ask",
+      "base": "wStkB",
+      "quote": "wUSDC",
+      "prices": ["0.0104", "0.0108", "0.0112", "0.0116", "0.0120"],
+      "giveTokens": "100",
+      "inventoryTokens": "1000",
+      "wallets": ["BC-01", "BC-02", "BC-03", "BC-04", "BC-05"]
+    },
+    {
+      "id": "BBID",
+      "side": "bid",
+      "base": "wStkB",
+      "quote": "wUSDC",
+      "prices": ["0.0096", "0.0092", "0.0088", "0.0084", "0.0080"],
+      "giveTokens": "1",
+      "inventoryTokens": "2",
+      "wallets": ["BC-06", "BC-07", "BC-08", "BC-09", "BC-10"]
+    }
+  ]
+}
