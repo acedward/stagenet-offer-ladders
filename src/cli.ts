@@ -27,12 +27,13 @@ import { startWatchdog } from "./watchdog.ts";
 import { openMakerOps } from "./maker-ops.ts";
 import { balanceRow, loadMintRecords, type MintRecord, mintAll, registerDustAll, serializeMintRecords } from "./makers.ts";
 import { redact, redactDeep } from "./redact.ts";
-import { settleOffer } from "./settle.ts";
+import { dryRunSettlement, settleOffer } from "./settle.ts";
 import type { TokenId } from "./tokens.ts";
 import { lookupTransaction } from "./tx-lookup.ts";
 import { verifyCurrentOffers } from "./verify.ts";
 import { WalletSession } from "./wallet-session.ts";
 import {
+  addMakersToFile,
   defaultMakersFile,
   generateMakers,
   identityOf,
@@ -140,6 +141,37 @@ const walletsGenerate: Command = async (flags) => {
       slot: maker.slot,
       unshieldedAddress: identityOf(maker.mnemonic, networkId).unshieldedAddress,
     })),
+  });
+  return 0;
+};
+
+/**
+ * wallets:add --ladders T13,T26,T52 --count 9 [--makers-file path] [--network stagenet]
+ *
+ * (00058 FR-006) Append `count / ladders` fresh maker wallets per ladder (`T13-01` …) to the
+ * EXISTING secrets file: refuses a missing file, a network mismatch and any id that already
+ * exists; writes `<file>.bak-<UTC stamp>` (600) first, then replaces the file atomically with
+ * every existing entry byte-identical. Prints wallet ids, unshielded addresses, counts and
+ * sha256s only (never a mnemonic). Then run wallets:check and wallets:addresses.
+ */
+const walletsAdd: Command = async (flags) => {
+  const makersFile = resolve(flag(flags, "makers-file", defaultMakersFile())!);
+  const laddersFlag = flag(flags, "ladders");
+  const countFlag = flag(flags, "count");
+  if (laddersFlag === undefined || countFlag === undefined) throw new Error("--ladders and --count are required (e.g. --ladders T13,T26,T52 --count 9)");
+  const ladders = laddersFlag.split(",").map((s) => s.trim()).filter(Boolean);
+  const networkId = flag(flags, "network", stagenet().networkId)!;
+  const plan = planMakerSlots(Number(countFlag), ladders);
+  const result = addMakersToFile(makersFile, { networkId, plan });
+  log(`added ${result.added.length} maker wallets to ${makersFile} (${result.before.entries} → ${result.after.entries}; backup ${result.backupFile})`);
+  printResult({
+    makersFile: result.makersFile,
+    backupFile: result.backupFile,
+    networkId: result.networkId,
+    before: result.before,
+    after: result.after,
+    preservedPrefix: result.preserved,
+    added: result.added.map((maker) => ({ slot: maker.slot, unshieldedAddress: maker.unshieldedAddress })),
   });
   return 0;
 };
@@ -286,29 +318,43 @@ const offersVerify: Command = async (flags) => {
   return result.pass ? 0 : 1;
 };
 
-/**
- * offers:settle --slot AB-02 --pay-with <coin nonce> [--ladder-file f] [--offer-id id]:
- * settle a slot's current offer on chain as a taker, with the FUNDING wallet, paying with
- * the named (pinned) coin of the want colour.
- */
-const offersSettle: Command = async (flags) => {
-  const overrides: { ladderFile?: string } = {};
-  const ladderFile = flag(flags, "ladder-file");
-  if (ladderFile !== undefined) overrides.ladderFile = ladderFile;
-  const config = loadServiceConfig(overrides);
+/** A bare switch (`--dry-run`); a value after it is refused rather than guessed at. */
+export const switchFlag = (flags: Flags, name: string): boolean => {
+  const value = flags[name];
+  if (value === undefined) return false;
+  if (value !== true) throw new Error(`--${name} takes no value (got ${JSON.stringify(value)})`);
+  return true;
+};
+
+/** The parsed arguments of `offers:settle` (exported for tests). */
+export const settleArgs = (flags: Flags): { slot: string; payWith: string; dryRun: boolean; offerId?: string; ladderFile?: string } => {
   const slot = flag(flags, "slot");
   const payWith = flag(flags, "pay-with");
   if (slot === undefined || payWith === undefined || !/^[0-9a-f]{64}$/u.test(payWith)) {
     throw new Error("--slot and --pay-with <64-hex coin nonce> are required");
   }
+  const offerId = flag(flags, "offer-id");
+  const ladderFile = flag(flags, "ladder-file");
+  return { slot, payWith, dryRun: switchFlag(flags, "dry-run"), ...(offerId === undefined ? {} : { offerId }), ...(ladderFile === undefined ? {} : { ladderFile }) };
+};
+
+/**
+ * offers:settle --slot AB-02 --pay-with <coin nonce> [--ladder-file f] [--offer-id id] [--dry-run]:
+ * settle a slot's current offer on chain as a taker, with the FUNDING wallet, paying with
+ * the named (pinned) coin of the want colour. With `--dry-run` (00058 FR-007) the settlement
+ * is balanced, proven and finalized, its fee and size reported, and it is NOT submitted.
+ */
+const offersSettle: Command = async (flags) => {
+  const { slot, payWith, dryRun, offerId: offerIdFlag, ladderFile } = settleArgs(flags);
+  const config = loadServiceConfig(ladderFile === undefined ? {} : { ladderFile });
   const journal = openJournal({ file: config.journalFile, networkId: config.ladders.networkId, mode: config.mode });
   const record = journal.get(slot);
   if (record === undefined) throw new Error(`no slot ${slot} in the journal`);
-  const offerId = flag(flags, "offer-id") ?? record.current?.offerId;
+  const offerId = offerIdFlag ?? record.current?.offerId;
   if (offerId === undefined) throw new Error(`slot ${slot} has no current offer (state ${record.state})`);
   const entry = new Outbox(config.outboxDir).get(offerId);
   if (entry === undefined) throw new Error(`outbox has no offer ${offerId}`);
-  const lock = fundingLock("00053 offers:settle");
+  const lock = fundingLock(dryRun ? "00058 offers:settle --dry-run" : "00053 offers:settle");
   try {
     const { height, parameters } = await fetchLedgerParameters(config.network);
     log(`ledger parameters from block ${height}`);
@@ -328,6 +374,27 @@ const offersSettle: Command = async (flags) => {
         throw new Error(`--pay-with ${payWith.slice(0, 12)}… is not a spendable coin of the offer's want colour`);
       }
       log(`offer's pinned coin spendable before settlement: ${pinnedBefore}; paying with ${payCoin.value} base units`);
+      if (dryRun) {
+        const dry = await dryRunSettlement({
+          session,
+          blob: entry.blob,
+          payColour: entry.wantColour,
+          payWithNonce: payWith,
+          feeParameters: parameters,
+          log,
+        });
+        printResult({
+          slot,
+          offerId,
+          offerCoin: entry.coinNonce,
+          gives: { colour: entry.giveColour, amount: entry.giveAmount },
+          wants: { colour: entry.wantColour, amount: entry.wantAmount },
+          paidWith: { nonce: payWith, value: payCoin.value },
+          takerDust: WalletSession.balancesOf(before).dust,
+          settlement: dry,
+        });
+        return 0;
+      }
       const result = await settleOffer({
         session,
         network: config.network,
@@ -729,6 +796,7 @@ const notYet = (phase: string): Command => async () => {
 
 export const COMMANDS: Readonly<Record<string, Command>> = {
   "wallets:generate": walletsGenerate,
+  "wallets:add": walletsAdd,
   "wallets:addresses": walletsAddresses,
   "wallets:check": walletsCheck,
   "makers:status": (flags) => withServiceLock("makers:status", () => makersStatus(flags)),
